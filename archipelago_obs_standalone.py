@@ -188,42 +188,84 @@ class StandaloneArchipelagoOBS:
 
     async def send_connect_packet(self):
         """Send connect packet once WebSocket is established"""
-        connect_packet = {
-            "cmd": "Connect",
-            "password": self.password,
-            "game": "Observer",
-            "name": self.auth,
-            "uuid": self.config.get('uuid', ''),
-            "version": {
-                "major": 0,
-                "minor": 4,
-                "build": 6
-            },
-            "items_handling": 0,
-            "tags": ["Tracker", "Observer"]
-        }
+        # Try multiple version formats in case server is picky
+        version_attempts = [
+            [0, 4, 6],  # List format
+            (0, 4, 6),  # Tuple format
+            "0.4.6",  # String format
+            {"major": 0, "minor": 4, "build": 6, "class": "Version"},  # Dict with class
+        ]
 
-        packet_json = json.dumps([connect_packet])
-        logger.debug(f"Sending connect packet: {packet_json}")
-        await self.archipelago_ws.send(packet_json)
-        logger.info("Sent connect packet, waiting for response...")
+        for i, version_format in enumerate(version_attempts):
+            connect_packet = {
+                "cmd": "Connect",
+                "password": self.password,
+                "game": "Observer",
+                "name": self.auth,
+                "uuid": self.config.get('uuid', ''),
+                "version": version_format,
+                "items_handling": 0,
+                "tags": ["Tracker", "Observer"]
+            }
 
-        # Wait for initial response
-        try:
-            response = await asyncio.wait_for(self.archipelago_ws.recv(), timeout=15)
-            logger.info("Received initial response from server")
-            logger.debug(f"Response: {response}")
+            packet_json = json.dumps([connect_packet])
+            logger.debug(
+                f"Attempt {i + 1}: Sending connect packet with version format {type(version_format).__name__}: {version_format}")
 
             try:
-                data = json.loads(response)
-                await self.handle_archipelago_message(data)
-                logger.info("Successfully processed server response")
-            except json.JSONDecodeError as e:
-                logger.warning(f"Could not parse initial response: {e}")
+                await self.archipelago_ws.send(packet_json)
+                logger.info(f"Sent connect packet (attempt {i + 1}), waiting for response...")
 
-        except asyncio.TimeoutError:
-            logger.warning("No response from server after 15 seconds")
-            # Don't return False here - connection might still work
+                # Wait for response
+                response = await asyncio.wait_for(self.archipelago_ws.recv(), timeout=10)
+                logger.info(f"Received response on attempt {i + 1}")
+                logger.debug(f"Response: {response}")
+
+                # Check if it's an error response
+                try:
+                    data = json.loads(response)
+
+                    # Look for connection refused or error messages
+                    for packet in data:
+                        if packet.get('cmd') == 'ConnectionRefused':
+                            logger.warning(f"Connection refused on attempt {i + 1}: {packet.get('errors', [])}")
+                            if i < len(version_attempts) - 1:
+                                logger.info(f"Trying next version format...")
+                                continue
+                        elif packet.get('cmd') == 'Connected':
+                            logger.info(f"✓ Connection successful with version format: {version_format}")
+                            await self.handle_archipelago_message(data)
+                            logger.info("Successfully processed server response")
+                            return
+                        else:
+                            # Some other response - process it
+                            await self.handle_archipelago_message(data)
+                            logger.info("Successfully processed server response")
+                            return
+
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Could not parse response on attempt {i + 1}: {e}")
+                    if i < len(version_attempts) - 1:
+                        continue
+
+                # If we get here, this attempt worked
+                logger.info(f"Connection appears successful with version format: {version_format}")
+                return
+
+            except asyncio.TimeoutError:
+                logger.warning(f"No response on attempt {i + 1} after 10 seconds")
+                if i < len(version_attempts) - 1:
+                    logger.info("Trying next version format...")
+                    continue
+            except Exception as e:
+                logger.warning(f"Attempt {i + 1} failed: {e}")
+                if i < len(version_attempts) - 1:
+                    logger.info("Trying next version format...")
+                    continue
+
+        # If all attempts failed
+        logger.error("All version format attempts failed")
+        logger.info("The server may require a specific Archipelago client version")
 
         logger.info("Initial handshake complete, ready to listen for events")
 

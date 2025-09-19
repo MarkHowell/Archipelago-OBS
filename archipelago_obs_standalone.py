@@ -42,6 +42,7 @@ class StandaloneArchipelagoOBS:
         self.port = config.get('archipelago_port', 38281)
         self.password = config.get('archipelago_password', '')
         self.auth = config.get('bot_name', 'OBS_Observer_Bot')
+        self.use_ssl = config.get('archipelago_use_ssl', False)
 
     async def connect_obs(self):
         """Connect to OBS WebSocket"""
@@ -58,34 +59,242 @@ class StandaloneArchipelagoOBS:
             return False
 
     async def connect_archipelago(self):
-        """Connect to Archipelago server"""
-        try:
-            uri = f"ws://{self.server}:{self.port}"
-            self.archipelago_ws = await websockets.connect(uri)
-            logger.info(f"Connected to Archipelago server at {uri}")
+        """Connect to Archipelago server with multiple protocol attempts"""
+        # Use SSL if configured
+        protocol = "wss" if self.use_ssl else "ws"
+        uri = f"{protocol}://{self.server}:{self.port}"
+        logger.info(f"Attempting to connect to {uri}...")
 
-            # Send connect packet with proper version tuple format
+        try:
+            # Test basic connectivity first
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex((self.server, self.port))
+            sock.close()
+
+            if result != 0:
+                logger.error(f"Cannot reach {self.server}:{self.port} - connection refused")
+                return False
+
+            logger.info("Basic connectivity test passed, attempting WebSocket connection...")
+
+            # Method 1: Try configured method (SSL or non-SSL)
+            try:
+                if self.use_ssl:
+                    import ssl
+                    ssl_context = ssl.create_default_context()
+                    # For archipelago.gg, we might need to be less strict about certificates
+                    ssl_context.check_hostname = False
+                    ssl_context.verify_mode = ssl.CERT_NONE
+
+                    self.archipelago_ws = await websockets.connect(
+                        uri,
+                        timeout=10,
+                        ssl=ssl_context
+                    )
+                else:
+                    self.archipelago_ws = await websockets.connect(
+                        uri,
+                        timeout=10
+                    )
+
+                logger.info(f"✓ {protocol.upper()} connection successful")
+                await self.send_connect_packet()
+                return True
+
+            except Exception as e:
+                logger.warning(f"{protocol.upper()} connection failed: {e}")
+
+                # If SSL was configured but failed, try non-SSL
+                if self.use_ssl:
+                    logger.info("Trying non-SSL fallback...")
+                    try:
+                        fallback_uri = f"ws://{self.server}:{self.port}"
+                        self.archipelago_ws = await websockets.connect(fallback_uri, timeout=10)
+                        logger.info("✓ Non-SSL fallback successful")
+                        await self.send_connect_packet()
+                        return True
+                    except Exception as fallback_e:
+                        logger.warning(f"Non-SSL fallback failed: {fallback_e}")
+
+                # If non-SSL was configured but failed, try SSL
+                elif not self.use_ssl:
+                    logger.info("Trying SSL fallback...")
+                    try:
+                        import ssl
+                        ssl_context = ssl.create_default_context()
+                        ssl_context.check_hostname = False
+                        ssl_context.verify_mode = ssl.CERT_NONE
+
+                        fallback_uri = f"wss://{self.server}:{self.port}"
+                        self.archipelago_ws = await websockets.connect(fallback_uri, timeout=10, ssl=ssl_context)
+                        logger.info("✓ SSL fallback successful")
+                        await self.send_connect_packet()
+                        return True
+                    except Exception as ssl_fallback_e:
+                        logger.warning(f"SSL fallback failed: {ssl_fallback_e}")
+
+            logger.error("All connection methods failed")
+            return False
+
+        except Exception as e:
+            logger.error(f"Unexpected error: {e}")
+            return False
+
+    async def try_raw_tcp_connection(self):
+        """Try connecting as a raw TCP client (some Archipelago servers use this)"""
+        import socket
+
+        logger.info("Attempting raw TCP connection...")
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
+
+        try:
+            sock.connect((self.server, self.port))
+            logger.info("✓ Raw TCP connection established")
+
+            # Send a basic Archipelago connect message as JSON
             connect_packet = {
                 "cmd": "Connect",
                 "password": self.password,
                 "game": "Observer",
                 "name": self.auth,
-                "uuid": self.config.get('uuid', ''),
-                "version": [0, 4, 6],  # Use list format instead of dict
-                "items_handling": 0,
-                "tags": ["Tracker", "Observer"],
-                "slot_data": False
+                "version": [0, 4, 6],
+                "items_handling": 0
             }
 
-            await self.archipelago_ws.send(json.dumps([connect_packet]))
-            logger.info("Sent connect packet to Archipelago")
-            return True
+            message = json.dumps([connect_packet]) + '\n'
+            sock.send(message.encode('utf-8'))
+            logger.info("Sent connect packet via raw TCP")
 
+            # Try to receive response
+            sock.settimeout(5)
+            response = sock.recv(4096).decode('utf-8', errors='ignore')
+            logger.info(f"Raw TCP response: {response[:200]}...")
+
+            if response.strip():
+                logger.info("✓ Received response from raw TCP connection")
+                logger.error("This appears to be a raw TCP server, but this script only supports WebSocket")
+                logger.info("You may need a different client or connection method")
+            else:
+                logger.warning("No response from raw TCP connection")
+
+        finally:
+            sock.close()
+
+        raise Exception("Raw TCP connection not implemented in this client")
+
+    async def send_connect_packet(self):
+        """Send connect packet once WebSocket is established"""
+        connect_packet = {
+            "cmd": "Connect",
+            "password": self.password,
+            "game": "Observer",
+            "name": self.auth,
+            "uuid": self.config.get('uuid', ''),
+            "version": {
+                "major": 0,
+                "minor": 4,
+                "build": 6
+            },
+            "items_handling": 0,
+            "tags": ["Tracker", "Observer"]
+        }
+
+        packet_json = json.dumps([connect_packet])
+        logger.debug(f"Sending connect packet: {packet_json}")
+        await self.archipelago_ws.send(packet_json)
+        logger.info("Sent connect packet, waiting for response...")
+
+        # Wait for initial response
+        try:
+            response = await asyncio.wait_for(self.archipelago_ws.recv(), timeout=15)
+            logger.info("Received initial response from server")
+            logger.debug(f"Response: {response}")
+
+            try:
+                data = json.loads(response)
+                await self.handle_archipelago_message(data)
+                logger.info("Successfully processed server response")
+            except json.JSONDecodeError as e:
+                logger.warning(f"Could not parse initial response: {e}")
+
+        except asyncio.TimeoutError:
+            logger.warning("No response from server after 15 seconds")
+            # Don't return False here - connection might still work
+
+        logger.info("Initial handshake complete, ready to listen for events")
+
+    async def test_connection(self):
+        """Test connection to Archipelago server without full setup"""
+        logger.info("=== CONNECTION TEST ===")
+        logger.info(f"Testing connection to {self.server}:{self.port}")
+
+        # Test 1: Basic TCP connectivity
+        try:
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex((self.server, self.port))
+            sock.close()
+
+            if result == 0:
+                logger.info("✓ TCP connection successful")
+            else:
+                logger.error("✗ TCP connection failed")
+                return False
         except Exception as e:
-            logger.error(f"Failed to connect to Archipelago: {e}")
+            logger.error(f"✗ TCP test failed: {e}")
             return False
 
-    async def request_data_package(self):
+        # Test 2: Check what's actually running on that port
+        try:
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            sock.connect((self.server, self.port))
+
+            # Send HTTP request to see what responds
+            sock.send(b"GET / HTTP/1.1\r\nHost: " + self.server.encode() + b"\r\n\r\n")
+            response = sock.recv(1024).decode('utf-8', errors='ignore')
+            sock.close()
+
+            logger.info(f"Raw server response: '{response}'")  # Show the actual response
+
+            if "archipelago" in response.lower():
+                logger.info("✓ Server appears to be Archipelago-related")
+            elif "websocket" in response.lower() or "upgrade" in response.lower():
+                logger.info("✓ Server appears to support WebSocket upgrade")
+                logger.info("Skipping basic WebSocket test - will try advanced connection")
+                return True  # Skip the basic test, go straight to advanced connection
+            elif "http" in response.lower():
+                logger.warning("⚠ Server responding as HTTP, not WebSocket")
+                logger.info("This might be the web interface port, not the game port")
+            else:
+                logger.warning(f"⚠ Server responding with unexpected protocol")
+
+        except Exception as e:
+            logger.error(f"✗ Protocol test failed: {e}")
+
+        # Test 3: Basic WebSocket handshake (skip if we detected WebSocket support above)
+        try:
+            uri = f"ws://{self.server}:{self.port}"
+            ws = await websockets.connect(uri, timeout=5)
+            logger.info("✓ WebSocket handshake successful")
+            await ws.close()
+            return True
+        except Exception as e:
+            logger.error(f"✗ Basic WebSocket handshake failed: {e}")
+
+            # Don't give up! The advanced connection method might still work
+            logger.info("Basic WebSocket test failed, but advanced connection might still work...")
+            logger.info("Proceeding to try advanced Archipelago connection methods...")
+            return True  # Return True to proceed to advanced connection
+
+        logger.info("=== CONNECTION TEST PASSED ===")
+        return True
         """Request data package for name resolution"""
         if not self.archipelago_ws:
             return
@@ -380,25 +589,40 @@ class StandaloneArchipelagoOBS:
 
     async def listen_to_archipelago(self):
         """Main message listening loop"""
+        logger.info("Starting continuous message listening...")
+
         try:
             async for message in self.archipelago_ws:
                 try:
                     data = json.loads(message)
                     await self.handle_archipelago_message(data)
                 except json.JSONDecodeError as e:
-                    logger.error(f"Failed to decode message: {e}")
+                    logger.warning(f"Failed to decode message: {e}")
+                    logger.debug(f"Raw message: {message}")
                 except Exception as e:
                     logger.error(f"Error handling message: {e}")
+                    logger.debug(f"Message data: {message}")
 
-        except ConnectionClosed:
-            logger.warning("Archipelago connection closed")
+        except ConnectionClosed as e:
+            logger.warning(f"Archipelago connection closed: {e}")
+            await self.trigger_obs_event("archipelago_disconnected", {})
+        except websockets.exceptions.WebSocketException as e:
+            logger.error(f"WebSocket error: {e}")
             await self.trigger_obs_event("archipelago_disconnected", {})
         except Exception as e:
-            logger.error(f"Error in message loop: {e}")
+            logger.error(f"Unexpected error in message loop: {e}")
+            logger.debug(f"Exception type: {type(e).__name__}")
+            await self.trigger_obs_event("archipelago_disconnected", {})
 
     async def run(self):
         """Main run loop"""
         logger.info("Starting Standalone Archipelago to OBS Bridge...")
+
+        # Test connection first
+        logger.info("Running connection diagnostics...")
+        if not await self.test_connection():
+            logger.error("Connection test failed. Please check your Archipelago server.")
+            return False
 
         # Connect to OBS
         await self.connect_obs()
@@ -408,16 +632,22 @@ class StandaloneArchipelagoOBS:
             return False
 
         self.running = True
+        logger.info("=== BRIDGE IS NOW RUNNING ===")
+        logger.info("Listening for Archipelago events... Press Ctrl+C to stop")
 
         try:
+            # This should run continuously until interrupted
             await self.listen_to_archipelago()
+
         except KeyboardInterrupt:
             logger.info("Received interrupt, shutting down...")
         except Exception as e:
-            logger.error(f"Unexpected error: {e}")
+            logger.error(f"Unexpected error in main loop: {e}")
+            logger.debug(f"Exception type: {type(e).__name__}")
         finally:
             await self.cleanup()
 
+        logger.info("Bridge stopped")
         return True
 
     async def cleanup(self):
@@ -436,9 +666,10 @@ class StandaloneArchipelagoOBS:
 def load_config(config_file: str = 'config.json') -> Dict[str, Any]:
     """Load configuration from file"""
     default_config = {
-        "archipelago_host": "localhost",
-        "archipelago_port": 38281,
+        "archipelago_host": "archipelago.gg",
+        "archipelago_port": 59331,
         "archipelago_password": "",
+        "archipelago_use_ssl": True,  # Enable SSL for archipelago.gg
         "bot_name": "OBS_Observer_Bot",
         "uuid": "",
         "obs_host": "localhost",

@@ -66,8 +66,8 @@ class ArchipelagoOBSContext(CommonContext):
         self.all_items = {}
 
         # Set server connection info
-        self.server = config.get('archipelago_host', 'localhost')
-        self.port = config.get('archipelago_port', 38281)
+        self.server = config.get('archipelago_host', 'archipelago.gg')
+        self.port = config.get('archipelago_port', 59331)
         self.password = config.get('archipelago_password', '')
         self.auth = config.get('bot_name', 'OBS_Observer_Bot')
 

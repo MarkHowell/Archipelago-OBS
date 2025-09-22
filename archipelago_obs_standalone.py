@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 """
-Standalone Archipelago to OBS Bridge
-Works without needing full Archipelago installation
+Archipelago to OBS Bridge using subprocess approach
+Spawns the official Archipelago text client and parses its output
 """
 
 import asyncio
 import json
 import logging
 import os
-from typing import Dict, Any, Optional, List
-import websockets
-from websockets.exceptions import ConnectionClosed
-import obsws_python as obs
+import re
+import subprocess
+import sys
+from typing import Dict, Any, Optional
+from datetime import datetime
+
+try:
+    import obsws_python as obs
+
+    OBS_AVAILABLE = True
+except ImportError:
+    print("Warning: obsws-python not available. Install with: pip install obsws-python")
+    OBS_AVAILABLE = False
 
 # Configure logging
 logging.basicConfig(
@@ -21,31 +30,49 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class StandaloneArchipelagoOBS:
-    """Standalone Archipelago observer that works without CommonClient"""
+class ArchipelagoSubprocessBridge:
+    """Bridge that uses official Archipelago client as subprocess"""
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.obs_client = None
-        self.archipelago_ws = None
+        self.archipelago_process = None
         self.running = False
 
-        # Store server state
-        self.connected_players = {}
-        self.player_names = {}
-        self.location_names = {}
-        self.item_names = {}
-        self.game_data = {}
+        # Find Archipelago installation
+        self.archipelago_dir = self.find_archipelago_directory()
 
-        # Connection info
-        self.server = config.get('archipelago_host', 'localhost')
-        self.port = config.get('archipelago_port', 38281)
-        self.password = config.get('archipelago_password', '')
-        self.auth = config.get('bot_name', 'OBS_Observer_Bot')
-        self.use_ssl = config.get('archipelago_use_ssl', False)
+    def find_archipelago_directory(self):
+        """Find the Archipelago installation directory"""
+        # Try common locations
+        possible_paths = [
+            # Current directory first
+            ".",
+            # Common installation paths
+            os.path.expanduser("~/Archipelago"),
+            os.path.expanduser("~/AppData/Local/Archipelago"),
+            "C:/Archipelago",
+            "C:/Program Files/Archipelago",
+            "C:/Program Files (x86)/Archipelago",
+            # Check if we're already in an Archipelago directory
+            os.path.dirname(os.path.abspath(__file__))
+        ]
+
+        for path in possible_paths:
+            if os.path.exists(os.path.join(path, "CommonClient.py")):
+                logger.info(f"Found Archipelago installation at: {path}")
+                return os.path.abspath(path)
+
+        logger.error("Could not find Archipelago installation")
+        logger.info("Please ensure this script is in your Archipelago directory or update the path")
+        return None
 
     async def connect_obs(self):
         """Connect to OBS WebSocket"""
+        if not OBS_AVAILABLE:
+            logger.warning("OBS integration disabled - obsws-python not available")
+            return False
+
         try:
             self.obs_client = obs.ReqClient(
                 host=self.config.get('obs_host', 'localhost'),
@@ -58,515 +85,340 @@ class StandaloneArchipelagoOBS:
             logger.error(f"Failed to connect to OBS: {e}")
             return False
 
-    async def connect_archipelago(self):
-        """Connect to Archipelago server with multiple protocol attempts"""
-        # Use SSL if configured
-        protocol = "wss" if self.use_ssl else "ws"
-        uri = f"{protocol}://{self.server}:{self.port}"
-        logger.info(f"Attempting to connect to {uri}...")
+    def start_archipelago_client(self):
+        """Start the official Archipelago text client as subprocess"""
+        if not self.archipelago_dir:
+            raise Exception("Archipelago directory not found")
 
-        try:
-            # Test basic connectivity first
-            import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            result = sock.connect_ex((self.server, self.port))
-            sock.close()
-
-            if result != 0:
-                logger.error(f"Cannot reach {self.server}:{self.port} - connection refused")
-                return False
-
-            logger.info("Basic connectivity test passed, attempting WebSocket connection...")
-
-            # Method 1: Try configured method (SSL or non-SSL)
-            try:
-                if self.use_ssl:
-                    import ssl
-                    ssl_context = ssl.create_default_context()
-                    # For archipelago.gg, we might need to be less strict about certificates
-                    ssl_context.check_hostname = False
-                    ssl_context.verify_mode = ssl.CERT_NONE
-
-                    self.archipelago_ws = await websockets.connect(
-                        uri,
-                        timeout=10,
-                        ssl=ssl_context
-                    )
-                else:
-                    self.archipelago_ws = await websockets.connect(
-                        uri,
-                        timeout=10
-                    )
-
-                logger.info(f"✓ {protocol.upper()} connection successful")
-                await self.send_connect_packet()
-                return True
-
-            except Exception as e:
-                logger.warning(f"{protocol.upper()} connection failed: {e}")
-
-                # If SSL was configured but failed, try non-SSL
-                if self.use_ssl:
-                    logger.info("Trying non-SSL fallback...")
-                    try:
-                        fallback_uri = f"ws://{self.server}:{self.port}"
-                        self.archipelago_ws = await websockets.connect(fallback_uri, timeout=10)
-                        logger.info("✓ Non-SSL fallback successful")
-                        await self.send_connect_packet()
-                        return True
-                    except Exception as fallback_e:
-                        logger.warning(f"Non-SSL fallback failed: {fallback_e}")
-
-                # If non-SSL was configured but failed, try SSL
-                elif not self.use_ssl:
-                    logger.info("Trying SSL fallback...")
-                    try:
-                        import ssl
-                        ssl_context = ssl.create_default_context()
-                        ssl_context.check_hostname = False
-                        ssl_context.verify_mode = ssl.CERT_NONE
-
-                        fallback_uri = f"wss://{self.server}:{self.port}"
-                        self.archipelago_ws = await websockets.connect(fallback_uri, timeout=10, ssl=ssl_context)
-                        logger.info("✓ SSL fallback successful")
-                        await self.send_connect_packet()
-                        return True
-                    except Exception as ssl_fallback_e:
-                        logger.warning(f"SSL fallback failed: {ssl_fallback_e}")
-
-            logger.error("All connection methods failed")
-            return False
-
-        except Exception as e:
-            logger.error(f"Unexpected error: {e}")
-            return False
-
-    async def try_raw_tcp_connection(self):
-        """Try connecting as a raw TCP client (some Archipelago servers use this)"""
-        import socket
-
-        logger.info("Attempting raw TCP connection...")
-
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(10)
-
-        try:
-            sock.connect((self.server, self.port))
-            logger.info("✓ Raw TCP connection established")
-
-            # Send a basic Archipelago connect message as JSON
-            connect_packet = {
-                "cmd": "Connect",
-                "password": self.password,
-                "game": "Observer",
-                "name": self.auth,
-                "version": [0, 4, 6],
-                "items_handling": 0
+        # Try different approaches to start the client
+        approaches = [
+            # Approach 1: Direct CommonClient.py with connection string
+            {
+                "cmd": [
+                    sys.executable,
+                    os.path.join(self.archipelago_dir, "CommonClient.py"),
+                    "--connect",
+                    f"{self.config.get('archipelago_host', 'localhost')}:{self.config.get('archipelago_port', 38281)}",
+                    "--name", self.config.get('bot_name', 'OBS_Observer_Bot')
+                ],
+                "name": "Direct CommonClient with --connect"
+            },
+            # Approach 2: Text client specifically
+            {
+                "cmd": [
+                    sys.executable,
+                    os.path.join(self.archipelago_dir, "TextClient.py"),
+                    f"{self.config.get('archipelago_host', 'localhost')}:{self.config.get('archipelago_port', 38281)}"
+                ],
+                "name": "TextClient.py"
+            },
+            # Approach 3: CommonClient with manual connection after startup
+            {
+                "cmd": [
+                    sys.executable,
+                    os.path.join(self.archipelago_dir, "CommonClient.py")
+                ],
+                "name": "CommonClient for manual connection",
+                "manual_connect": True
             }
-
-            message = json.dumps([connect_packet]) + '\n'
-            sock.send(message.encode('utf-8'))
-            logger.info("Sent connect packet via raw TCP")
-
-            # Try to receive response
-            sock.settimeout(5)
-            response = sock.recv(4096).decode('utf-8', errors='ignore')
-            logger.info(f"Raw TCP response: {response[:200]}...")
-
-            if response.strip():
-                logger.info("✓ Received response from raw TCP connection")
-                logger.error("This appears to be a raw TCP server, but this script only supports WebSocket")
-                logger.info("You may need a different client or connection method")
-            else:
-                logger.warning("No response from raw TCP connection")
-
-        finally:
-            sock.close()
-
-        raise Exception("Raw TCP connection not implemented in this client")
-
-    async def send_connect_packet(self):
-        """Send connect packet once WebSocket is established"""
-        # Try multiple version formats in case server is picky
-        version_attempts = [
-            [0, 4, 6],  # List format
-            (0, 4, 6),  # Tuple format
-            "0.4.6",  # String format
-            {"major": 0, "minor": 4, "build": 6, "class": "Version"},  # Dict with class
         ]
 
-        for i, version_format in enumerate(version_attempts):
-            connect_packet = {
-                "cmd": "Connect",
-                "password": self.password,
-                "game": "Observer",
-                "name": self.auth,
-                "uuid": self.config.get('uuid', ''),
-                "version": version_format,
-                "items_handling": 0,
-                "tags": ["Tracker", "Observer"]
-            }
+        for i, approach in enumerate(approaches):
+            logger.info(f"Trying approach {i + 1}: {approach['name']}")
 
-            packet_json = json.dumps([connect_packet])
-            logger.debug(
-                f"Attempt {i + 1}: Sending connect packet with version format {type(version_format).__name__}: {version_format}")
+            # Add password if provided
+            cmd = approach["cmd"].copy()
+            if self.config.get('archipelago_password') and not approach.get('manual_connect'):
+                cmd.extend(["--password", self.config['archipelago_password']])
+
+            logger.info(f"Command: {' '.join(cmd)}")
 
             try:
-                await self.archipelago_ws.send(packet_json)
-                logger.info(f"Sent connect packet (attempt {i + 1}), waiting for response...")
+                # Start the process
+                self.archipelago_process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.PIPE,
+                    universal_newlines=True,
+                    bufsize=1,  # Line buffered
+                    cwd=self.archipelago_dir
+                )
 
-                # Wait for response
-                response = await asyncio.wait_for(self.archipelago_ws.recv(), timeout=10)
-                logger.info(f"Received response on attempt {i + 1}")
-                logger.debug(f"Response: {response}")
+                # If this is manual connect, send connection commands via stdin
+                if approach.get('manual_connect'):
+                    connection_commands = [
+                        f"/connect {self.config.get('archipelago_host', 'localhost')}:{self.config.get('archipelago_port', 38281)}",
+                        f"/name {self.config.get('bot_name', 'OBS_Observer_Bot')}"
+                    ]
 
-                # Check if it's an error response
-                try:
-                    data = json.loads(response)
+                    if self.config.get('archipelago_password'):
+                        connection_commands.append(f"/password {self.config['archipelago_password']}")
 
-                    # Look for connection refused or error messages
-                    for packet in data:
-                        if packet.get('cmd') == 'ConnectionRefused':
-                            logger.warning(f"Connection refused on attempt {i + 1}: {packet.get('errors', [])}")
-                            if i < len(version_attempts) - 1:
-                                logger.info(f"Trying next version format...")
-                                continue
-                        elif packet.get('cmd') == 'Connected':
-                            logger.info(f"✓ Connection successful with version format: {version_format}")
-                            await self.handle_archipelago_message(data)
-                            logger.info("Successfully processed server response")
-                            return
-                        else:
-                            # Some other response - process it
-                            await self.handle_archipelago_message(data)
-                            logger.info("Successfully processed server response")
-                            return
+                    # Send commands
+                    for cmd in connection_commands:
+                        logger.info(f"Sending command: {cmd}")
+                        self.archipelago_process.stdin.write(cmd + '\n')
+                        self.archipelago_process.stdin.flush()
 
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Could not parse response on attempt {i + 1}: {e}")
-                    if i < len(version_attempts) - 1:
-                        continue
+                # Give the process a moment to start
+                import time
+                time.sleep(2)
 
-                # If we get here, this attempt worked
-                logger.info(f"Connection appears successful with version format: {version_format}")
-                return
+                # Check if process is still running
+                if self.archipelago_process.poll() is None:
+                    logger.info(f"Approach {i + 1} successful - process running")
 
-            except asyncio.TimeoutError:
-                logger.warning(f"No response on attempt {i + 1} after 10 seconds")
-                if i < len(version_attempts) - 1:
-                    logger.info("Trying next version format...")
+                    # If this is the log monitoring approach, set up log monitoring instead of stdout
+                    if approach.get('monitor_logs'):
+                        self.log_file_path = self.find_latest_log_file()
+                        logger.info(f"Will monitor log file: {self.log_file_path}")
+
+                    return self.archipelago_process
+                else:
+                    # Process exited, try next approach
+                    logger.warning(
+                        f"Approach {i + 1} failed - process exited with code {self.archipelago_process.returncode}")
                     continue
+
             except Exception as e:
-                logger.warning(f"Attempt {i + 1} failed: {e}")
-                if i < len(version_attempts) - 1:
-                    logger.info("Trying next version format...")
-                    continue
+                logger.warning(f"Approach {i + 1} failed: {e}")
+                continue
 
-        # If all attempts failed
-        logger.error("All version format attempts failed")
-        logger.info("The server may require a specific Archipelago client version")
+        # If all approaches failed
+        raise Exception("All client startup approaches failed")
 
-        logger.info("Initial handshake complete, ready to listen for events")
+    def find_latest_log_file(self):
+        """Find the most recent Archipelago log file"""
+        log_patterns = [
+            "*.log",
+            "Archipelago*.log",
+            "logs/*.log",
+            "logs/Archipelago*.log"
+        ]
 
-    async def test_connection(self):
-        """Test connection to Archipelago server without full setup"""
-        logger.info("=== CONNECTION TEST ===")
-        logger.info(f"Testing connection to {self.server}:{self.port}")
+        import glob
 
-        # Test 1: Basic TCP connectivity
-        try:
-            import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            result = sock.connect_ex((self.server, self.port))
-            sock.close()
+        latest_file = None
+        latest_time = 0
 
-            if result == 0:
-                logger.info("✓ TCP connection successful")
-            else:
-                logger.error("✗ TCP connection failed")
-                return False
-        except Exception as e:
-            logger.error(f"✗ TCP test failed: {e}")
-            return False
+        for pattern in log_patterns:
+            for log_file in glob.glob(os.path.join(self.archipelago_dir, pattern)):
+                mtime = os.path.getmtime(log_file)
+                if mtime > latest_time:
+                    latest_time = mtime
+                    latest_file = log_file
 
-        # Test 2: Check what's actually running on that port
-        try:
-            import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            sock.connect((self.server, self.port))
+        return latest_file
 
-            # Send HTTP request to see what responds
-            sock.send(b"GET / HTTP/1.1\r\nHost: " + self.server.encode() + b"\r\n\r\n")
-            response = sock.recv(1024).decode('utf-8', errors='ignore')
-            sock.close()
-
-            logger.info(f"Raw server response: '{response}'")  # Show the actual response
-
-            if "archipelago" in response.lower():
-                logger.info("✓ Server appears to be Archipelago-related")
-            elif "websocket" in response.lower() or "upgrade" in response.lower():
-                logger.info("✓ Server appears to support WebSocket upgrade")
-                logger.info("Skipping basic WebSocket test - will try advanced connection")
-                return True  # Skip the basic test, go straight to advanced connection
-            elif "http" in response.lower():
-                logger.warning("⚠ Server responding as HTTP, not WebSocket")
-                logger.info("This might be the web interface port, not the game port")
-            else:
-                logger.warning(f"⚠ Server responding with unexpected protocol")
-
-        except Exception as e:
-            logger.error(f"✗ Protocol test failed: {e}")
-
-        # Test 3: Basic WebSocket handshake (skip if we detected WebSocket support above)
-        try:
-            uri = f"ws://{self.server}:{self.port}"
-            ws = await websockets.connect(uri, timeout=5)
-            logger.info("✓ WebSocket handshake successful")
-            await ws.close()
-            return True
-        except Exception as e:
-            logger.error(f"✗ Basic WebSocket handshake failed: {e}")
-
-            # Don't give up! The advanced connection method might still work
-            logger.info("Basic WebSocket test failed, but advanced connection might still work...")
-            logger.info("Proceeding to try advanced Archipelago connection methods...")
-            return True  # Return True to proceed to advanced connection
-
-        logger.info("=== CONNECTION TEST PASSED ===")
-        return True
-        """Request data package for name resolution"""
-        if not self.archipelago_ws:
+    async def monitor_log_file(self):
+        """Monitor the Archipelago log file for new entries"""
+        if not hasattr(self, 'log_file_path') or not self.log_file_path:
+            logger.error("No log file path set for monitoring")
             return
 
-        data_package_request = {
-            "cmd": "GetDataPackage",
-            "games": []
+        logger.info(f"Monitoring log file: {self.log_file_path}")
+
+        # Patterns for log file entries
+        patterns = {
+            'item_received': re.compile(r'(.+?) received (.+?) from (.+?)'),
+            'item_sent': re.compile(r'(.+?) sent (.+?) to (.+?)'),
+            'location_checked': re.compile(r'(.+?) checked (.+?)'),
+            'player_joined': re.compile(r'(.+?) has joined'),
+            'player_left': re.compile(r'(.+?) has left'),
+            'goal_completed': re.compile(r'(.+?) completed their goal'),
+            'connected': re.compile(r'Connected|has joined'),
+            'file_log': re.compile(r'\[FileLog.*?\]: (.+)'),
+            'server_message': re.compile(r'Notice.*?: (.+)'),
         }
-        await self.archipelago_ws.send(json.dumps([data_package_request]))
-        logger.info("Requested data package")
 
-    def resolve_player_name(self, player_id: int) -> str:
-        """Get player name from ID"""
-        return self.player_names.get(player_id, f"Player_{player_id}")
+        try:
+            # Start from the end of the file
+            with open(self.log_file_path, 'r', encoding='utf-8') as f:
+                f.seek(0, 2)  # Go to end of file
 
-    def resolve_item_name(self, item_id: int) -> str:
-        """Get item name from ID"""
-        for game_items in self.item_names.values():
-            if item_id in game_items:
-                return game_items[item_id]
-        return f"Item_{item_id}"
+                while self.running:
+                    line = f.readline()
+                    if not line:
+                        await asyncio.sleep(0.1)  # Wait for new content
+                        continue
 
-    def resolve_location_name(self, location_id: int) -> str:
-        """Get location name from ID"""
-        for game_locations in self.location_names.values():
-            if location_id in game_locations:
-                return game_locations[location_id]
-        return f"Location_{location_id}"
+                    line = line.strip()
+                    if not line:
+                        continue
 
-    async def handle_archipelago_message(self, message_data: list):
-        """Process messages from Archipelago server"""
-        for packet in message_data:
-            cmd = packet.get('cmd')
+                    logger.debug(f"Log line: {line}")
 
-            try:
-                if cmd == 'Connected':
-                    await self.handle_connected(packet)
-                elif cmd == 'RoomInfo':
-                    await self.handle_room_info(packet)
-                elif cmd == 'ReceivedItems':
-                    await self.handle_received_items(packet)
-                elif cmd == 'LocationInfo':
-                    await self.handle_location_info(packet)
-                elif cmd == 'RoomUpdate':
-                    await self.handle_room_update(packet)
-                elif cmd == 'PrintJSON':
-                    await self.handle_print_json(packet)
-                elif cmd == 'DataPackage':
-                    await self.handle_data_package(packet)
-                elif cmd == 'ConnectionRefused':
-                    await self.handle_connection_refused(packet)
-                else:
-                    logger.debug(f"Unknown command: {cmd}")
+                    # Skip kivy and system messages
+                    if any(skip in line for skip in ['[kivy', '[GL:', '[Base:', '[Window:', '[Image:', '[Text:']):
+                        continue
 
-            except Exception as e:
-                logger.error(f"Error handling {cmd}: {e}")
+                    # Parse the line
+                    await self.parse_and_trigger_events(line, patterns)
 
-    async def handle_connected(self, packet):
-        """Handle successful connection"""
-        slot_data = packet.get('slot_data', {})
-        slot_info = packet.get('slot_info', {})
+        except Exception as e:
+            logger.error(f"Error monitoring log file: {e}")
 
-        # Store player information
-        for slot_id, player_info in slot_info.items():
-            slot_id = int(slot_id)
-            self.player_names[slot_id] = player_info.get('name', f'Player_{slot_id}')
-            self.connected_players[slot_id] = {
-                'name': player_info.get('name'),
-                'game': player_info.get('game'),
-                'type': player_info.get('type', 0)
-            }
+    async def process_archipelago_output(self):
+        """Process output from the Archipelago client or log file"""
+        if not self.archipelago_process:
+            return
 
-        logger.info(f"Observer connected! Monitoring {len(slot_info)} players")
+        # If we're monitoring logs, use log file monitoring instead
+        if hasattr(self, 'log_file_path') and self.log_file_path:
+            await self.monitor_log_file()
+            return
 
-        # Request data package for name resolution
-        await self.request_data_package()
+        logger.info("Starting to monitor Archipelago client output...")
 
-        await self.trigger_obs_event("server_connected", {
-            "player_count": len(slot_info),
-            "players": self.connected_players
-        })
+        # Patterns for different types of messages
+        patterns = {
+            'item_received': re.compile(r'(.+?) received (.+?) from (.+?)'),
+            'item_sent': re.compile(r'(.+?) sent (.+?) to (.+?)'),
+            'location_checked': re.compile(r'(.+?) checked (.+?)'),
+            'player_joined': re.compile(r'(.+?) has joined'),
+            'player_left': re.compile(r'(.+?) has left'),
+            'goal_completed': re.compile(r'(.+?) completed their goal'),
+            'hint': re.compile(r'Hint: (.+?)'),
+            'chat': re.compile(r'\[(.+?)\] (.+?): (.+)'),
+            'server_message': re.compile(r'Notice.*?: (.+)'),
+            'release': re.compile(r'(.+?) has released'),
+            'collect': re.compile(r'(.+?) has collected'),
+            'connected': re.compile(r'Successfully connected to (.+?)'),
+            'connection_failed': re.compile(r'Failed to connect|Connection.*failed|Unable to connect'),
+        }
 
-    async def handle_room_info(self, packet):
-        """Handle room information"""
-        await self.trigger_obs_event("room_info", {
-            "seed_name": packet.get('seed_name', 'Unknown'),
-            "players": len(packet.get('players', [])),
-            "permissions": packet.get('permissions', {}),
-            "hint_cost": packet.get('hint_cost', 10)
-        })
+        try:
+            # Read output line by line
+            while self.running and self.archipelago_process.poll() is None:
+                line = await asyncio.get_event_loop().run_in_executor(
+                    None, self.archipelago_process.stdout.readline
+                )
 
-    async def handle_connection_refused(self, packet):
-        """Handle connection refusal"""
-        errors = packet.get('errors', [])
-        logger.error(f"Connection refused: {errors}")
+                if not line:
+                    continue
 
-        await self.trigger_obs_event("connection_refused", {
-            "errors": errors
-        })
+                line = line.strip()
+                if not line:
+                    continue
 
-    async def handle_received_items(self, packet):
-        """Handle item reception events"""
-        items = packet.get('items', [])
-        index = packet.get('index', 0)
+                logger.debug(f"Archipelago output: {line}")
 
-        for i, item in enumerate(items):
-            receiving_player = self.resolve_player_name(item.get('player', 0))
-            item_name = self.resolve_item_name(item.get('item', 0))
-            location_name = self.resolve_location_name(item.get('location', 0))
+                # Skip warning messages
+                if "warning" in line.lower() or "_speedups" in line:
+                    continue
 
-            await self.trigger_obs_event("item_received", {
-                "receiving_player": receiving_player,
-                "item_name": item_name,
-                "location_name": location_name,
-                "item_id": item.get('item'),
-                "location_id": item.get('location'),
-                "player_id": item.get('player'),
-                "flags": item.get('flags', 0)
-            })
+                # Parse the line and trigger appropriate OBS events
+                await self.parse_and_trigger_events(line, patterns)
 
-    async def handle_location_info(self, packet):
-        """Handle location check events"""
-        locations = packet.get('locations', [])
+        except Exception as e:
+            logger.error(f"Error processing Archipelago output: {e}")
+        finally:
+            logger.info("Stopped monitoring Archipelago output")
 
-        for location in locations:
-            player_name = self.resolve_player_name(location.get('player', 0))
-            item_name = self.resolve_item_name(location.get('item', 0))
-            location_name = self.resolve_location_name(location.get('location', 0))
+    async def parse_and_trigger_events(self, line: str, patterns: Dict[str, re.Pattern]):
+        """Parse a line of output and trigger appropriate OBS events"""
+        try:
+            # Check each pattern
+            for event_type, pattern in patterns.items():
+                match = pattern.search(line)
+                if match:
+                    await self.handle_parsed_event(event_type, match.groups(), line)
+                    return
 
-            await self.trigger_obs_event("location_checked", {
-                "player_name": player_name,
-                "item_name": item_name,
-                "location_name": location_name,
-                "player_id": location.get('player'),
-                "item_id": location.get('item'),
-                "location_id": location.get('location')
-            })
+            # Log unmatched lines for debugging
+            logger.debug(f"Unmatched line: {line}")
 
-    async def handle_room_update(self, packet):
-        """Handle room updates"""
-        await self.trigger_obs_event("room_update", packet)
+            # Trigger a generic event for any unmatched but potentially interesting lines
+            if any(keyword in line.lower() for keyword in ['item', 'location', 'player', 'goal', 'hint', 'chat']):
+                await self.trigger_obs_event("raw_message", {
+                    "text": line,
+                    "timestamp": datetime.now().isoformat()
+                })
 
-    async def handle_print_json(self, packet):
-        """Handle PrintJSON messages"""
-        message_type = packet.get('type', 'Chat')
-        data = packet.get('data', [])
+        except Exception as e:
+            logger.error(f"Error parsing line '{line}': {e}")
 
-        # Simple parsing of PrintJSON data
-        parsed_text = self.parse_print_json_data(data)
-
+    async def handle_parsed_event(self, event_type: str, groups: tuple, raw_line: str):
+        """Handle a successfully parsed event"""
         event_data = {
-            "type": message_type,
-            "text": parsed_text,
-            "raw_data": data
+            "raw_line": raw_line,
+            "timestamp": datetime.now().isoformat()
         }
 
-        # Map message types to events
-        event_mapping = {
-            'ItemSend': 'global_item_send',
-            'ItemCheat': 'global_item_found',
-            'Hint': 'global_hint',
-            'Join': 'global_player_join',
-            'Part': 'global_player_part',
-            'Chat': 'global_chat',
-            'ServerChat': 'server_chat',
-            'Goal': 'goal_completed',
-            'Release': 'player_released',
-            'Collect': 'player_collected',
-            'Countdown': 'countdown'
-        }
+        if event_type == 'item_received':
+            event_data.update({
+                "receiving_player": groups[0],
+                "item_name": groups[1],
+                "sending_player": groups[2],
+                "text": f"{groups[0]} received {groups[1]} from {groups[2]}"
+            })
 
-        event_name = event_mapping.get(message_type, 'unknown_message')
-        await self.trigger_obs_event(event_name, event_data)
+        elif event_type == 'item_sent':
+            event_data.update({
+                "sending_player": groups[0],
+                "item_name": groups[1],
+                "receiving_player": groups[2],
+                "text": f"{groups[0]} sent {groups[1]} to {groups[2]}"
+            })
 
-    def parse_print_json_data(self, data: List) -> str:
-        """Parse PrintJSON data to readable text"""
-        result = ""
+        elif event_type == 'location_checked':
+            event_data.update({
+                "player_name": groups[0],
+                "location_name": groups[1],
+                "text": f"{groups[0]} checked {groups[1]}"
+            })
 
-        for part in data:
-            if isinstance(part, dict):
-                part_type = part.get('type')
-                text = part.get('text', '')
+        elif event_type == 'player_joined':
+            event_data.update({
+                "player_name": groups[0],
+                "text": f"{groups[0]} joined the game"
+            })
 
-                if part_type == 'player_id' and isinstance(text, int):
-                    result += self.resolve_player_name(text)
-                elif part_type == 'item_id' and isinstance(text, int):
-                    result += self.resolve_item_name(text)
-                elif part_type == 'location_id' and isinstance(text, int):
-                    result += self.resolve_location_name(text)
-                else:
-                    result += str(text)
-            else:
-                result += str(part)
+        elif event_type == 'player_left':
+            event_data.update({
+                "player_name": groups[0],
+                "text": f"{groups[0]} left the game"
+            })
 
-        return result
+        elif event_type == 'goal_completed':
+            event_data.update({
+                "player_name": groups[0],
+                "text": f"{groups[0]} completed their goal!"
+            })
 
-    async def handle_data_package(self, packet):
-        """Handle data package for name resolution"""
-        data_package = packet.get('data', {})
-        games = data_package.get('games', {})
+        elif event_type == 'hint':
+            event_data.update({
+                "hint_text": groups[0],
+                "text": f"Hint: {groups[0]}"
+            })
 
-        for game_name, game_data in games.items():
-            self.game_data[game_name] = game_data
+        elif event_type == 'chat':
+            event_data.update({
+                "timestamp_str": groups[0],
+                "player_name": groups[1],
+                "message": groups[2],
+                "text": f"{groups[1]}: {groups[2]}"
+            })
 
-            # Store item names
-            if game_name not in self.item_names:
-                self.item_names[game_name] = {}
-            if 'item_name_to_id' in game_data:
-                for item_name, item_id in game_data['item_name_to_id'].items():
-                    self.item_names[game_name][item_id] = item_name
+        elif event_type == 'server_message':
+            event_data.update({
+                "message": groups[0],
+                "text": groups[0]
+            })
 
-            # Store location names
-            if game_name not in self.location_names:
-                self.location_names[game_name] = {}
-            if 'location_name_to_id' in game_data:
-                for location_name, location_id in game_data['location_name_to_id'].items():
-                    self.location_names[game_name][location_id] = location_name
+        else:
+            # Generic handling for other events
+            event_data["text"] = raw_line
 
-        logger.info(f"Updated data package for {len(games)} games")
-
-        await self.trigger_obs_event("data_package_updated", {
-            "games": list(games.keys()),
-            "game_count": len(games)
-        })
+        # Trigger the OBS event
+        await self.trigger_obs_event(event_type, event_data)
 
     async def trigger_obs_event(self, event_type: str, event_data: Dict[str, Any]):
-        """Trigger OBS events based on Archipelago events"""
+        """Trigger OBS events based on parsed Archipelago events"""
         if not self.obs_client:
             if self.config.get('log_all_events', True):
-                logger.info(f"[NO OBS] {event_type}: {event_data}")
+                logger.info(f"[NO OBS] {event_type}: {event_data.get('text', str(event_data))}")
             return
 
         try:
@@ -598,12 +450,12 @@ class StandaloneArchipelagoOBS:
                     try:
                         formatted_text = text_template.format(**event_data)
                     except (KeyError, ValueError):
-                        formatted_text = f"{event_type}: {event_data.get('text', str(event_data))}"
+                        formatted_text = event_data.get('text', str(event_data))
 
                     self.obs_client.set_input_settings(
                         source_name, {"text": formatted_text}, True
                     )
-                    logger.info(f"Updated text source {source_name}")
+                    logger.info(f"Updated text source {source_name}: {formatted_text}")
 
                 elif action_type == 'filter_toggle':
                     source_name = action_config.get('source_name')
@@ -622,83 +474,63 @@ class StandaloneArchipelagoOBS:
 
             # Log events
             if self.config.get('log_all_events', True):
-                logger.info(f"Archipelago event: {event_type}")
+                logger.info(f"Archipelago event: {event_type} - {event_data.get('text', '')}")
                 if self.config.get('log_event_data', False):
                     logger.debug(f"Event data: {event_data}")
 
         except Exception as e:
             logger.error(f"Failed to trigger OBS event {event_type}: {e}")
 
-    async def listen_to_archipelago(self):
-        """Main message listening loop"""
-        logger.info("Starting continuous message listening...")
-
-        try:
-            async for message in self.archipelago_ws:
-                try:
-                    data = json.loads(message)
-                    await self.handle_archipelago_message(data)
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to decode message: {e}")
-                    logger.debug(f"Raw message: {message}")
-                except Exception as e:
-                    logger.error(f"Error handling message: {e}")
-                    logger.debug(f"Message data: {message}")
-
-        except ConnectionClosed as e:
-            logger.warning(f"Archipelago connection closed: {e}")
-            await self.trigger_obs_event("archipelago_disconnected", {})
-        except websockets.exceptions.WebSocketException as e:
-            logger.error(f"WebSocket error: {e}")
-            await self.trigger_obs_event("archipelago_disconnected", {})
-        except Exception as e:
-            logger.error(f"Unexpected error in message loop: {e}")
-            logger.debug(f"Exception type: {type(e).__name__}")
-            await self.trigger_obs_event("archipelago_disconnected", {})
-
     async def run(self):
         """Main run loop"""
-        logger.info("Starting Standalone Archipelago to OBS Bridge...")
+        logger.info("Starting Subprocess-based Archipelago to OBS Bridge...")
 
-        # Test connection first
-        logger.info("Running connection diagnostics...")
-        if not await self.test_connection():
-            logger.error("Connection test failed. Please check your Archipelago server.")
+        if not self.archipelago_dir:
+            logger.error("Cannot find Archipelago installation")
             return False
 
         # Connect to OBS
         await self.connect_obs()
 
-        # Connect to Archipelago
-        if not await self.connect_archipelago():
+        # Start Archipelago client
+        try:
+            self.start_archipelago_client()
+        except Exception as e:
+            logger.error(f"Failed to start Archipelago client: {e}")
             return False
 
         self.running = True
+
         logger.info("=== BRIDGE IS NOW RUNNING ===")
-        logger.info("Listening for Archipelago events... Press Ctrl+C to stop")
+        logger.info("Monitoring official Archipelago client output...")
+        logger.info("Press Ctrl+C to stop")
 
         try:
-            # This should run continuously until interrupted
-            await self.listen_to_archipelago()
+            # Start monitoring the client output
+            await self.process_archipelago_output()
 
         except KeyboardInterrupt:
             logger.info("Received interrupt, shutting down...")
         except Exception as e:
-            logger.error(f"Unexpected error in main loop: {e}")
-            logger.debug(f"Exception type: {type(e).__name__}")
+            logger.error(f"Unexpected error: {e}")
         finally:
             await self.cleanup()
 
-        logger.info("Bridge stopped")
         return True
 
     async def cleanup(self):
-        """Clean up connections"""
+        """Clean up resources"""
         self.running = False
 
-        if self.archipelago_ws:
-            await self.archipelago_ws.close()
-            logger.info("Closed Archipelago connection")
+        if self.archipelago_process:
+            logger.info("Terminating Archipelago client process...")
+            self.archipelago_process.terminate()
+            try:
+                self.archipelago_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.warning("Archipelago client did not terminate gracefully, killing...")
+                self.archipelago_process.kill()
+            logger.info("Archipelago client process stopped")
 
         if self.obs_client:
             self.obs_client.disconnect()
@@ -711,79 +543,55 @@ def load_config(config_file: str = 'config.json') -> Dict[str, Any]:
         "archipelago_host": "archipelago.gg",
         "archipelago_port": 59331,
         "archipelago_password": "",
-        "archipelago_use_ssl": True,  # Enable SSL for archipelago.gg
         "bot_name": "OBS_Observer_Bot",
-        "uuid": "",
         "obs_host": "localhost",
         "obs_port": 4455,
         "obs_password": "",
         "log_all_events": True,
         "log_event_data": False,
         "obs_actions": {
-            "global_item_send": {
+            "item_received": {
+                "type": "text_update",
+                "source_name": "LastItemReceived",
+                "text_template": "{text}"
+            },
+            "item_sent": {
                 "type": "text_update",
                 "source_name": "LastItemSent",
                 "text_template": "{text}"
             },
-            "global_item_found": {
-                "type": "text_update",
-                "source_name": "LastItemFound",
-                "text_template": "{text}"
-            },
-            "item_received": {
-                "type": "text_update",
-                "source_name": "LastItemReceived",
-                "text_template": "{receiving_player} got {item_name}"
-            },
             "location_checked": {
                 "type": "text_update",
                 "source_name": "LastLocationChecked",
-                "text_template": "{player_name} checked {location_name}"
+                "text_template": "{text}"
             },
-            "global_player_join": {
+            "player_joined": {
                 "type": "text_update",
                 "source_name": "PlayerStatus",
-                "text_template": "Player joined: {text}"
+                "text_template": "{text}"
             },
-            "global_player_part": {
+            "player_left": {
                 "type": "text_update",
                 "source_name": "PlayerStatus",
-                "text_template": "Player left: {text}"
+                "text_template": "{text}"
             },
             "goal_completed": {
                 "type": "scene_switch",
                 "scene_name": "GoalCompleted"
             },
-            "player_released": {
+            "hint": {
                 "type": "text_update",
-                "source_name": "ReleaseNotice",
-                "text_template": "Player Released! {text}"
+                "source_name": "LastHint",
+                "text_template": "{text}"
             },
-            "player_collected": {
-                "type": "text_update",
-                "source_name": "CollectNotice",
-                "text_template": "Player Collected! {text}"
-            },
-            "server_connected": {
-                "type": "source_visibility",
-                "scene_name": "Main",
-                "source_name": "ConnectedIndicator",
-                "visible": True
-            },
-            "archipelago_disconnected": {
-                "type": "source_visibility",
-                "scene_name": "Main",
-                "source_name": "ConnectedIndicator",
-                "visible": False
-            },
-            "room_info": {
-                "type": "text_update",
-                "source_name": "SeedInfo",
-                "text_template": "Seed: {seed_name} | Players: {players}"
-            },
-            "global_chat": {
+            "chat": {
                 "type": "text_update",
                 "source_name": "LastChatMessage",
+                "text_template": "{text}"
+            },
+            "server_message": {
+                "type": "text_update",
+                "source_name": "ServerMessage",
                 "text_template": "{text}"
             }
         }
@@ -817,18 +625,20 @@ def load_config(config_file: str = 'config.json') -> Dict[str, Any]:
 
 async def main():
     """Main entry point"""
+    print("Subprocess-based Archipelago to OBS Bridge")
+    print("Uses the official Archipelago client as subprocess")
+    print()
+
     config = load_config()
-    bridge = StandaloneArchipelagoOBS(config)
+    bridge = ArchipelagoSubprocessBridge(config)
     await bridge.run()
 
 
 if __name__ == "__main__":
-    # Install required packages:
-    # pip install websockets obsws-python
-
-    print("Starting Standalone Archipelago to OBS Bridge...")
-    print("This version works without needing full Archipelago installation.")
-    print("Only requires: pip install websockets obsws-python")
-    print()
+    # This approach uses the official Archipelago client as a subprocess
+    # Benefits:
+    # - Uses the official client (no version compatibility issues)
+    # - Parses text output to detect events
+    # - Should work with any server the official client works with
 
     asyncio.run(main())

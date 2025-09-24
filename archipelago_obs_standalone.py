@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Archipelago to OBS Bridge with PNG support for ticker display
-Supports player-specific and event-type-specific images
+Archipelago to OBS Bridge with Integrated Animation System
+Supports player-specific PNGs and smooth animations
 """
 
 import asyncio
@@ -13,7 +13,6 @@ import subprocess
 import sys
 from typing import Dict, Any
 from datetime import datetime
-import shutil
 from pathlib import Path
 
 try:
@@ -32,8 +31,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class ArchipelagoTickerBridge:
-    """Enhanced bridge with PNG support for ticker display"""
+class ArchipelagoAnimatedBridge:
+    """Enhanced bridge with PNG support and smooth animations"""
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
@@ -78,25 +77,21 @@ class ArchipelagoTickerBridge:
 
         for img_path, description in examples.items():
             if not img_path.exists():
-                # Create a simple text file as placeholder
                 placeholder_path = img_path.with_suffix('.txt')
                 placeholder_path.write_text(f"Replace with PNG: {description}")
 
     def get_player_image(self, player_name: str) -> str:
         """Get player-specific image path"""
-        # Sanitize player name for filename
         safe_name = re.sub(r'[^\w\-_\.]', '_', player_name)
         player_img = self.images['players'] / f"{safe_name}.png"
 
         if player_img.exists():
             return str(player_img)
 
-        # Try lowercase version
         player_img_lower = self.images['players'] / f"{safe_name.lower()}.png"
         if player_img_lower.exists():
             return str(player_img_lower)
 
-        # Return default
         default_img = self.images['players'] / 'default_player.png'
         return str(default_img) if default_img.exists() else None
 
@@ -107,54 +102,157 @@ class ArchipelagoTickerBridge:
 
     def get_item_image(self, item_name: str) -> str:
         """Get item-specific image path"""
-        # Sanitize item name for filename
         safe_name = re.sub(r'[^\w\-_\.]', '_', item_name)
         item_img = self.images['items'] / f"{safe_name}.png"
 
         if item_img.exists():
             return str(item_img)
 
-        # Try lowercase version
         item_img_lower = self.images['items'] / f"{safe_name.lower()}.png"
         if item_img_lower.exists():
             return str(item_img_lower)
 
-        # Return default
         default_img = self.images['items'] / 'default_item.png'
         return str(default_img) if default_img.exists() else None
 
     def get_location_image(self, location_name: str) -> str:
         """Get location-specific image path"""
-        # Sanitize location name for filename
         safe_name = re.sub(r'[^\w\-_\.]', '_', location_name)
         location_img = self.images['locations'] / f"{safe_name}.png"
 
         if location_img.exists():
             return str(location_img)
 
-        # Try lowercase version
         location_img_lower = self.images['locations'] / f"{safe_name.lower()}.png"
         if location_img_lower.exists():
             return str(location_img_lower)
 
-        # Return default
         default_img = self.images['locations'] / 'default_location.png'
         return str(default_img) if default_img.exists() else None
 
-    def update_ticker_display(self, event_data: Dict[str, Any]):
-        """Update the ticker with new event including images"""
+    async def hide_ticker_sources(self, scene_name: str):
+        """Hide ticker sources to prepare for animation"""
+        ticker_config = self.config.get('ticker_config', {})
+        animation_config = self.config.get('animation_config', {})
+
+        if not animation_config.get('enable_animations', True):
+            return
+
+        sources_to_hide = []
+
+        # Always hide text
+        if ticker_config.get('text_source'):
+            sources_to_hide.append(ticker_config['text_source'])
+
+        # Always hide event icon
+        if ticker_config.get('event_image_source'):
+            sources_to_hide.append(ticker_config['event_image_source'])
+
+        # Conditionally hide other sources if they will be updated
+        if ticker_config.get('player_image_source'):
+            sources_to_hide.append(ticker_config['player_image_source'])
+
+        if ticker_config.get('item_image_source'):
+            sources_to_hide.append(ticker_config['item_image_source'])
+
+        if ticker_config.get('location_image_source'):
+            sources_to_hide.append(ticker_config['location_image_source'])
+
+        for source_name in sources_to_hide:
+            try:
+                response = self.obs_client.get_scene_item_id(
+                    scene_name=scene_name,
+                    source_name=source_name
+                )
+                item_id = getattr(response, "sceneItemId", None)
+
+                if item_id is not None:
+                    self.obs_client.set_scene_item_enabled(
+                        scene_name=scene_name,
+                        scene_item_id=item_id,
+                        scene_item_enabled=False
+                    )
+            except Exception as e:
+                logger.debug(f"Could not hide source {source_name}: {e}")
+
+    async def show_ticker_sources(self, scene_name: str):
+        """Show ticker sources to trigger animations"""
+        ticker_config = self.config.get('ticker_config', {})
+        animation_config = self.config.get('animation_config', {})
+
+        if not animation_config.get('enable_animations', True):
+            return
+
+        sources_to_show = []
+
+        # Always show text and event icon
+        if ticker_config.get('text_source'):
+            sources_to_show.append(ticker_config['text_source'])
+
+        if ticker_config.get('event_image_source'):
+            sources_to_show.append(ticker_config['event_image_source'])
+
+        if ticker_config.get('player_image_source'):
+            sources_to_show.append(ticker_config['player_image_source'])
+
+        if ticker_config.get('item_image_source'):
+            sources_to_show.append(ticker_config['item_image_source'])
+
+        if ticker_config.get('location_image_source'):
+            sources_to_show.append(ticker_config['location_image_source'])
+
+        for source_name in sources_to_show:
+            try:
+                response = self.obs_client.get_scene_item_id(
+                    scene_name=scene_name,
+                    source_name=source_name
+                )
+                item_id = getattr(response, "sceneItemId", None)
+
+                if item_id is not None:
+                    self.obs_client.set_scene_item_enabled(
+                        scene_name=scene_name,
+                        scene_item_id=item_id,
+                        scene_item_enabled=True
+                    )
+            except Exception as e:
+                logger.debug(f"Could not show source {source_name}: {e}")
+
+    async def update_ticker_display(self, event_data: Dict[str, Any]):
+        """Update ticker display with content and animations"""
         if not self.obs_client:
             return
 
         ticker_config = self.config.get('ticker_config', {})
+        animation_config = self.config.get('animation_config', {})
+        scene_name = animation_config.get('scene_name', 'Main Stream')
 
+        # Step 1: Hide sources if animations are enabled
+        if animation_config.get('enable_animations', True):
+            await self.hide_ticker_sources(scene_name)
+
+        # Step 2: Update all content while sources are hidden
+        await self.update_ticker_content(event_data, ticker_config)
+
+        # Step 3: Brief pause to ensure content updates are processed
+        if animation_config.get('enable_animations', True):
+            await asyncio.sleep(animation_config.get('pause_duration', 0.15))
+
+            # Step 4: Show sources to trigger animations
+            await self.show_ticker_sources(scene_name)
+
+            logger.info(f"Animated ticker update: {event_data.get('ticker_text', '')}")
+        else:
+            logger.info(f"Static ticker update: {event_data.get('ticker_text', '')}")
+
+    async def update_ticker_content(self, event_data: Dict[str, Any], ticker_config: Dict[str, Any]):
+        """Update ticker content (text and images)"""
         # Update main ticker text
         ticker_text_source = ticker_config.get('text_source', 'TickerText')
         ticker_text = event_data.get('ticker_text', event_data.get('text', ''))
 
         try:
             self.obs_client.set_input_settings(ticker_text_source, {"text": ticker_text}, True)
-            logger.info(f"Updated ticker text: {ticker_text}")
         except Exception as e:
             logger.error(f"Failed to update ticker text: {e}")
 
@@ -169,7 +267,6 @@ class ArchipelagoTickerBridge:
                         {"file": player_img_path},
                         True
                     )
-                    logger.info(f"Updated player image: {player_img_path}")
                 except Exception as e:
                     logger.error(f"Failed to update player image: {e}")
 
@@ -183,7 +280,6 @@ class ArchipelagoTickerBridge:
                     {"file": event_img_path},
                     True
                 )
-                logger.info(f"Updated event image: {event_img_path}")
             except Exception as e:
                 logger.error(f"Failed to update event image: {e}")
 
@@ -198,7 +294,6 @@ class ArchipelagoTickerBridge:
                         {"file": item_img_path},
                         True
                     )
-                    logger.info(f"Updated item image: {item_img_path}")
                 except Exception as e:
                     logger.error(f"Failed to update item image: {e}")
 
@@ -212,9 +307,43 @@ class ArchipelagoTickerBridge:
                         {"file": location_img_path},
                         True
                     )
-                    logger.info(f"Updated location image: {location_img_path}")
                 except Exception as e:
                     logger.error(f"Failed to update location image: {e}")
+
+    async def handle_goal_completion_celebration(self, event_data: Dict[str, Any]):
+        """Handle special goal completion celebration"""
+        animation_config = self.config.get('animation_config', {})
+
+        if not animation_config.get('enable_celebrations', True):
+            return
+
+        celebration_scene = animation_config.get('celebration_scene', 'GoalCompleted')
+        main_scene = animation_config.get('scene_name', 'Main Stream')
+        duration = animation_config.get('celebration_duration', 5.0)
+
+        try:
+            # Update celebration scene with player name if it has text sources
+            celebration_text = f"🎉 {event_data.get('player_name', 'Someone')} COMPLETED THEIR GOAL! 🎉"
+            celebration_source = animation_config.get('celebration_text_source', 'CelebrationText')
+
+            try:
+                self.obs_client.set_input_settings(celebration_source, {"text": celebration_text}, True)
+            except Exception:
+                pass  # Celebration text source is optional
+
+            # Switch to celebration scene
+            self.obs_client.set_current_program_scene(celebration_scene)
+            logger.info(f"🎉 GOAL CELEBRATION: Switched to {celebration_scene}")
+
+            # Wait for celebration duration
+            await asyncio.sleep(duration)
+
+            # Return to main scene
+            self.obs_client.set_current_program_scene(main_scene)
+            logger.info(f"Returned to {main_scene} after celebration")
+
+        except Exception as e:
+            logger.error(f"Failed to execute goal completion celebration: {e}")
 
     def find_archipelago_directory(self):
         possible_paths = [
@@ -448,10 +577,14 @@ class ArchipelagoTickerBridge:
             logger.info(f"[NO OBS] {event_type}: {event_data.get('text', str(event_data))}")
             return
 
-        # Update ticker display
-        self.update_ticker_display(event_data)
+        # Update ticker display with animations
+        await self.update_ticker_display(event_data)
 
-        # Existing OBS actions
+        # Handle special goal completion celebration
+        if event_type == 'goal_completed':
+            await self.handle_goal_completion_celebration(event_data)
+
+        # Existing OBS actions (kept for backward compatibility)
         try:
             obs_actions = self.config.get('obs_actions', {})
             if event_type in obs_actions:
@@ -485,7 +618,7 @@ class ArchipelagoTickerBridge:
             logger.error(f"Failed to trigger OBS event {event_type}: {e}")
 
     async def run(self):
-        logger.info("Starting Ticker-based Archipelago to OBS Bridge...")
+        logger.info("Starting Animated Archipelago to OBS Bridge...")
         if not self.archipelago_dir:
             logger.error("Cannot find Archipelago installation")
             return False
@@ -536,6 +669,15 @@ def load_config(config_file: str = 'config.json') -> Dict[str, Any]:
             "item_image_source": "TickerItemImage",
             "location_image_source": "TickerLocationImage"
         },
+        "animation_config": {
+            "enable_animations": True,
+            "scene_name": "Main Stream",
+            "pause_duration": 0.15,
+            "enable_celebrations": True,
+            "celebration_scene": "GoalCompleted",
+            "celebration_duration": 5.0,
+            "celebration_text_source": "CelebrationText"
+        },
         "obs_actions": {
             "item_received": {"type": "text_update", "source_name": "LastItemReceived", "text_template": "{text}"},
             "item_sent": {"type": "text_update", "source_name": "LastItemSent", "text_template": "{text}"},
@@ -578,14 +720,65 @@ def load_config(config_file: str = 'config.json') -> Dict[str, Any]:
 
 async def main():
     """Main entry point"""
-    print("Archipelago to OBS Ticker Bridge with PNG Support")
-    print("Supports player avatars and event-specific icons")
+    print("=== Animated Archipelago to OBS Ticker Bridge ===")
+    print("Features:")
+    print("• Player-specific PNG avatars")
+    print("• Event-type icons")
+    print("• Item/location specific images")
+    print("• Smooth slide-in/pop animations")
+    print("• Goal completion celebrations")
     print()
 
     config = load_config()
-    bridge = ArchipelagoTickerBridge(config)
-    await bridge.run()
+
+    # Display configuration summary
+    print("Configuration Summary:")
+    print(f"• Archipelago: {config['archipelago_host']}:{config['archipelago_port']}")
+    print(f"• OBS: {config['obs_host']}:{config['obs_port']}")
+    print(f"• Images: {config['images_base_dir']}")
+    print(f"• Animations: {'Enabled' if config['animation_config']['enable_animations'] else 'Disabled'}")
+    print(f"• Celebrations: {'Enabled' if config['animation_config']['enable_celebrations'] else 'Disabled'}")
+    print()
+
+    bridge = ArchipelagoAnimatedBridge(config)
+
+    try:
+        await bridge.run()
+    except KeyboardInterrupt:
+        print("\nShutdown requested by user")
+        await bridge.cleanup()
+    except Exception as e:
+        logger.error(f"Bridge crashed: {e}")
+        await bridge.cleanup()
 
 
 if __name__ == "__main__":
+    print("Archipelago Animated Ticker Bridge")
+    print("==================================")
+    print()
+    print("Setup Instructions:")
+    print("1. Set up OBS sources with exact names:")
+    print("   - TickerText (Text source)")
+    print("   - TickerPlayerImage (Image source)")
+    print("   - TickerEventImage (Image source)")
+    print("   - TickerItemImage (Image source)")
+    print("   - TickerLocationImage (Image source)")
+    print()
+    print("2. Add filters to sources for animations:")
+    print("   - TickerText: Move filter (slide from left)")
+    print("   - Images: Scale/Aspect Ratio filter (pop in from 0% to 100%)")
+    print()
+    print("3. Enable OBS WebSocket server:")
+    print("   - Tools → WebSocket Server Settings")
+    print("   - Enable server, set port 4455")
+    print()
+    print("4. Place PNG files in:")
+    print("   - images/players/PlayerName.png")
+    print("   - images/events/item_received.png, location_checked.png, etc.")
+    print("   - images/items/ItemName.png")
+    print("   - images/locations/LocationName.png")
+    print()
+    print("Starting bridge...")
+    print()
+
     asyncio.run(main())

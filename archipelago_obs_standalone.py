@@ -219,7 +219,7 @@ class ArchipelagoAnimatedBridge:
                 logger.debug(f"Could not show source {source_name}: {e}")
 
     async def update_ticker_display(self, event_data: Dict[str, Any]):
-        """Update ticker display with content and animations"""
+        """Update ticker with proper position reset for animations"""
         if not self.obs_client:
             return
 
@@ -227,23 +227,233 @@ class ArchipelagoAnimatedBridge:
         animation_config = self.config.get('animation_config', {})
         scene_name = animation_config.get('scene_name', 'Main Stream')
 
-        # Step 1: Hide sources if animations are enabled
+        logger.info(f"🎬 Updating ticker for: {event_data.get('event_type', 'unknown')}")
+
         if animation_config.get('enable_animations', True):
-            await self.hide_ticker_sources(scene_name)
+            # STEP 1: Reset positions to start (off-screen/invisible)
+            await self.reset_ticker_positions(ticker_config, scene_name)
 
-        # Step 2: Update all content while sources are hidden
-        await self.update_ticker_content(event_data, ticker_config)
+            # STEP 2: Update content while sources are off-screen
+            await self.update_ticker_content(event_data, ticker_config)
 
-        # Step 3: Brief pause to ensure content updates are processed
-        if animation_config.get('enable_animations', True):
-            await asyncio.sleep(animation_config.get('pause_duration', 0.15))
+            # STEP 3: Brief pause to ensure content updates
+            await asyncio.sleep(0.1)
 
-            # Step 4: Show sources to trigger animations
-            await self.show_ticker_sources(scene_name)
+            # STEP 4: Animate sources to final positions
+            await self.animate_ticker_to_final_positions(ticker_config, animation_config, scene_name)
 
-            logger.info(f"Animated ticker update: {event_data.get('ticker_text', '')}")
+            logger.info(f"✅ Animated ticker update complete: {event_data.get('ticker_text', '')}")
         else:
-            logger.info(f"Static ticker update: {event_data.get('ticker_text', '')}")
+            # Just update content without animations
+            await self.update_ticker_content(event_data, ticker_config)
+            logger.info(f"Static update: {event_data.get('ticker_text', '')}")
+
+    async def reset_ticker_positions(self, ticker_config: Dict, scene_name: str):
+        """Reset all ticker elements to starting positions (off-screen/invisible)"""
+        logger.info("🔄 Resetting ticker positions to start...")
+
+        # Reset text to off-screen left
+        text_source = ticker_config.get('text_source', 'TickerText')
+        await self.set_source_position(text_source, scene_name, x=-400, y=None)  # Off-screen left
+
+        # Reset images to scale 0 (invisible)
+        image_sources = [
+            ticker_config.get('player_image_source', 'TickerPlayerImage'),
+            ticker_config.get('event_image_source', 'TickerEventImage'),
+            ticker_config.get('item_image_source', 'TickerItemImage'),
+            ticker_config.get('location_image_source', 'TickerLocationImage')
+        ]
+
+        for source_name in image_sources:
+            if source_name:
+                await self.set_source_scale(source_name, scene_name, scale_x=0.0, scale_y=0.0)
+
+    async def animate_ticker_to_final_positions(self, ticker_config: Dict, animation_config: Dict, scene_name: str):
+        """Animate all ticker elements to their final positions"""
+        logger.info("🎬 Starting animations to final positions...")
+
+        duration = animation_config.get('animation_duration', 0.6)
+        steps = animation_config.get('animation_steps', 25)
+
+        # Start text slide animation
+        text_source = ticker_config.get('text_source', 'TickerText')
+        text_task = asyncio.create_task(
+            self.animate_text_slide_fixed(text_source, scene_name, duration, steps)
+        )
+
+        # Start image pop animations with staggered timing
+        image_sources = [
+            ticker_config.get('player_image_source', 'TickerPlayerImage'),
+            ticker_config.get('event_image_source', 'TickerEventImage'),
+            ticker_config.get('item_image_source', 'TickerItemImage'),
+            ticker_config.get('location_image_source', 'TickerLocationImage')
+        ]
+
+        image_tasks = []
+        for i, source_name in enumerate(image_sources):
+            if source_name:
+                delay = i * 0.15  # 150ms stagger between images
+                task = asyncio.create_task(
+                    self.animate_image_pop_fixed(source_name, scene_name, duration * 0.8, steps, delay)
+                )
+                image_tasks.append(task)
+
+        # Wait for all animations to complete
+        await text_task
+        if image_tasks:
+            await asyncio.gather(*image_tasks)
+
+        logger.info("🎉 All animations complete!")
+
+    async def set_source_position(self, source_name: str, scene_name: str, x: float = None, y: float = None):
+        """Set source position instantly - FIXED method signature"""
+        try:
+            # Get scene items to find the source
+            scene_items = self.obs_client.get_scene_item_list(scene_name)
+            item_id = None
+
+            for item in scene_items.scene_items:
+                if item.get('sourceName') == source_name:
+                    item_id = item.get('sceneItemId')
+                    break
+
+            if item_id is not None:
+                transform = {}
+                if x is not None:
+                    transform["positionX"] = x
+                if y is not None:
+                    transform["positionY"] = y
+
+                if transform:
+                    self.obs_client.set_scene_item_transform(scene_name, item_id, transform)
+                    logger.debug(f"Set {source_name} position: {transform}")
+
+        except Exception as e:
+            logger.debug(f"Could not set position for {source_name}: {e}")
+
+    async def set_source_scale(self, source_name: str, scene_name: str, scale_x: float, scale_y: float):
+        """Set source scale instantly - FIXED method signature"""
+        try:
+            # Get scene items to find the source
+            scene_items = self.obs_client.get_scene_item_list(scene_name)
+            item_id = None
+
+            for item in scene_items.scene_items:
+                if item.get('sourceName') == source_name:
+                    item_id = item.get('sceneItemId')
+                    break
+
+            if item_id is not None:
+                transform = {
+                    "scaleX": scale_x,
+                    "scaleY": scale_y
+                }
+                self.obs_client.set_scene_item_transform(scene_name, item_id, transform)
+                logger.debug(f"Set {source_name} scale: {scale_x}, {scale_y}")
+
+        except Exception as e:
+            logger.debug(f"Could not set scale for {source_name}: {e}")
+
+    async def animate_text_slide_fixed(self, source_name: str, scene_name: str, duration: float, steps: int):
+        """Slide text from off-screen to final position - FIXED method signature"""
+        try:
+            # Get scene items to find the source
+            scene_items = self.obs_client.get_scene_item_list(scene_name)
+            item_id = None
+            original_x = None
+
+            for item in scene_items.scene_items:
+                if item.get('sourceName') == source_name:
+                    item_id = item.get('sceneItemId')
+                    break
+
+            if item_id is None:
+                logger.warning(f"Text source {source_name} not found in scene {scene_name}")
+                return
+
+            # Get current position to use as end position
+            try:
+                current_transform = self.obs_client.get_scene_item_transform(scene_name, item_id)
+                original_x = current_transform.scene_item_transform.get('positionX', 200)
+            except:
+                original_x = 200  # Fallback
+
+            # Animation from off-screen left to original position
+            start_x = -500  # Start further off-screen left
+            end_x = float(original_x)
+            step_delay = duration / steps
+
+            logger.info(f"🎬 Animating {source_name} from X:{start_x} to X:{end_x} over {duration}s")
+
+            for step in range(steps + 1):
+                progress = step / steps
+                # Ease-out curve for smooth deceleration
+                eased_progress = 1 - (1 - progress) ** 2.5
+
+                current_x = start_x + (end_x - start_x) * eased_progress
+
+                self.obs_client.set_scene_item_transform(scene_name, item_id, {"positionX": current_x})
+
+                if step < steps:
+                    await asyncio.sleep(step_delay)
+
+            logger.info(f"✅ Text slide complete: {source_name} at X:{end_x}")
+
+        except Exception as e:
+            logger.error(f"Failed to animate text slide for {source_name}: {e}")
+
+    async def animate_image_pop_fixed(self, source_name: str, scene_name: str, duration: float, steps: int,
+                                      delay: float = 0):
+        """Scale image from 0 to 1 with bounce effect - FIXED method signature"""
+        if delay > 0:
+            logger.info(f"🎬 {source_name} waiting {delay}s before animation...")
+            await asyncio.sleep(delay)
+
+        try:
+            # Get scene items to find the source
+            scene_items = self.obs_client.get_scene_item_list(scene_name)
+            item_id = None
+
+            for item in scene_items.scene_items:
+                if item.get('sourceName') == source_name:
+                    item_id = item.get('sceneItemId')
+                    break
+
+            if item_id is None:
+                logger.warning(f"Image source {source_name} not found in scene {scene_name}")
+                return
+
+            step_delay = duration / steps
+            logger.info(f"🎬 Animating {source_name} scale 0→1 over {duration}s")
+
+            for step in range(steps + 1):
+                progress = step / steps
+
+                # Bounce effect - overshoots then settles
+                if progress < 0.6:
+                    # Growing phase with overshoot
+                    scale = progress * 1.4  # Grow to 140%
+                elif progress < 0.8:
+                    # Settle back phase
+                    overshoot_progress = (progress - 0.6) / 0.2
+                    scale = 1.4 * 0.6 + (1.1 - 1.4 * 0.6) * overshoot_progress  # Settle to 110%
+                else:
+                    # Final settle phase
+                    final_progress = (progress - 0.8) / 0.2
+                    scale = 1.1 + (1.0 - 1.1) * final_progress  # Settle to 100%
+
+                # Ensure scale is never negative
+                scale = max(0, scale)
+
+                self.obs_client.set_scene_item_transform(scene_name, item_id, {"scaleX": scale, "scaleY": scale})
+
+                if step < steps:
+                    await asyncio.sleep(step_delay)
+
+            logger.info(f"✅ Image pop complete: {source_name} at scale 1.0")
+
+        except Exception as e:
+            logger.error(f"Failed to animate image pop for {source_name}: {e}")
 
     async def update_ticker_content(self, event_data: Dict[str, Any], ticker_config: Dict[str, Any]):
         """Update ticker content (text and images)"""

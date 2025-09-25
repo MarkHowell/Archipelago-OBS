@@ -130,94 +130,6 @@ class ArchipelagoAnimatedBridge:
         default_img = self.images['locations'] / 'default_location.png'
         return str(default_img) if default_img.exists() else None
 
-    async def hide_ticker_sources(self, scene_name: str):
-        """Hide ticker sources to prepare for animation"""
-        ticker_config = self.config.get('ticker_config', {})
-        animation_config = self.config.get('animation_config', {})
-
-        if not animation_config.get('enable_animations', True):
-            return
-
-        sources_to_hide = []
-
-        # Always hide text
-        if ticker_config.get('text_source'):
-            sources_to_hide.append(ticker_config['text_source'])
-
-        # Always hide event icon
-        if ticker_config.get('event_image_source'):
-            sources_to_hide.append(ticker_config['event_image_source'])
-
-        # Conditionally hide other sources if they will be updated
-        if ticker_config.get('player_image_source'):
-            sources_to_hide.append(ticker_config['player_image_source'])
-
-        if ticker_config.get('item_image_source'):
-            sources_to_hide.append(ticker_config['item_image_source'])
-
-        if ticker_config.get('location_image_source'):
-            sources_to_hide.append(ticker_config['location_image_source'])
-
-        for source_name in sources_to_hide:
-            try:
-                response = self.obs_client.get_scene_item_id(
-                    scene_name=scene_name,
-                    source_name=source_name
-                )
-                item_id = getattr(response, "sceneItemId", None)
-
-                if item_id is not None:
-                    self.obs_client.set_scene_item_enabled(
-                        scene_name=scene_name,
-                        scene_item_id=item_id,
-                        scene_item_enabled=False
-                    )
-            except Exception as e:
-                logger.debug(f"Could not hide source {source_name}: {e}")
-
-    async def show_ticker_sources(self, scene_name: str):
-        """Show ticker sources to trigger animations"""
-        ticker_config = self.config.get('ticker_config', {})
-        animation_config = self.config.get('animation_config', {})
-
-        if not animation_config.get('enable_animations', True):
-            return
-
-        sources_to_show = []
-
-        # Always show text and event icon
-        if ticker_config.get('text_source'):
-            sources_to_show.append(ticker_config['text_source'])
-
-        if ticker_config.get('event_image_source'):
-            sources_to_show.append(ticker_config['event_image_source'])
-
-        if ticker_config.get('player_image_source'):
-            sources_to_show.append(ticker_config['player_image_source'])
-
-        if ticker_config.get('item_image_source'):
-            sources_to_show.append(ticker_config['item_image_source'])
-
-        if ticker_config.get('location_image_source'):
-            sources_to_show.append(ticker_config['location_image_source'])
-
-        for source_name in sources_to_show:
-            try:
-                response = self.obs_client.get_scene_item_id(
-                    scene_name=scene_name,
-                    source_name=source_name
-                )
-                item_id = getattr(response, "sceneItemId", None)
-
-                if item_id is not None:
-                    self.obs_client.set_scene_item_enabled(
-                        scene_name=scene_name,
-                        scene_item_id=item_id,
-                        scene_item_enabled=True
-                    )
-            except Exception as e:
-                logger.debug(f"Could not show source {source_name}: {e}")
-
     async def update_ticker_display(self, event_data: Dict[str, Any]):
         """Update ticker with proper position reset for animations"""
         if not self.obs_client:
@@ -252,9 +164,15 @@ class ArchipelagoAnimatedBridge:
         """Reset all ticker elements to starting positions (off-screen/invisible)"""
         logger.info("🔄 Resetting ticker positions to start...")
 
-        # Reset text to off-screen left
+        # Get animation config to use configurable start positions
+        animation_config = self.config.get('animation_config', {})
+
+        # Reset text to configurable off-screen position
         text_source = ticker_config.get('text_source', 'TickerText')
-        await self.set_source_position(text_source, scene_name, x=-400, y=None)  # Off-screen left
+        text_start_x = animation_config.get('text_start_x', -400)  # Use config value, fallback to -400
+        await self.set_source_position(text_source, scene_name, x=text_start_x, y=None)
+
+        logger.info(f"🔄 Reset {text_source} to X: {text_start_x}")
 
         # Reset images to scale 0 (invisible)
         image_sources = [
@@ -275,10 +193,10 @@ class ArchipelagoAnimatedBridge:
         duration = animation_config.get('animation_duration', 0.6)
         steps = animation_config.get('animation_steps', 25)
 
-        # Start text slide animation
+        # Start text slide animation - pass animation_config parameter
         text_source = ticker_config.get('text_source', 'TickerText')
         text_task = asyncio.create_task(
-            self.animate_text_slide_fixed(text_source, scene_name, duration, steps)
+            self.animate_text_slide_fixed(text_source, scene_name, animation_config, duration, steps)
         )
 
         # Start image pop animations with staggered timing
@@ -354,13 +272,12 @@ class ArchipelagoAnimatedBridge:
         except Exception as e:
             logger.debug(f"Could not set scale for {source_name}: {e}")
 
-    async def animate_text_slide_fixed(self, source_name: str, scene_name: str, duration: float, steps: int):
-        """Slide text from off-screen to final position - FIXED method signature"""
+    async def animate_text_slide_fixed(self, source_name: str, scene_name: str, animation_config: Dict, duration: float,
+                                       steps: int):
+        """Slide text from off-screen to final position with configurable parameters"""
         try:
-            # Get scene items to find the source
             scene_items = self.obs_client.get_scene_item_list(scene_name)
             item_id = None
-            original_x = None
 
             for item in scene_items.scene_items:
                 if item.get('sourceName') == source_name:
@@ -371,33 +288,24 @@ class ArchipelagoAnimatedBridge:
                 logger.warning(f"Text source {source_name} not found in scene {scene_name}")
                 return
 
-            # Get current position to use as end position
-            try:
-                current_transform = self.obs_client.get_scene_item_transform(scene_name, item_id)
-                original_x = current_transform.scene_item_transform.get('positionX', 200)
-            except:
-                original_x = 200  # Fallback
+            # Get configurable parameters from animation_config
+            start_x = float(animation_config.get('text_start_x', -500))
+            end_x = float(animation_config.get('text_end_x', 200))
+            easing_power = animation_config.get('text_easing_power', 2.5)
 
-            # Animation from off-screen left to original position
-            start_x = -500  # Start further off-screen left
-            end_x = float(original_x)
             step_delay = duration / steps
 
-            logger.info(f"🎬 Animating {source_name} from X:{start_x} to X:{end_x} over {duration}s")
+            logger.info(f"🎬 WORKING: Animating {source_name} from X:{start_x} to X:{end_x} over {duration}s")
 
             for step in range(steps + 1):
                 progress = step / steps
-                # Ease-out curve for smooth deceleration
-                eased_progress = 1 - (1 - progress) ** 2.5
-
+                eased_progress = 1 - (1 - progress) ** easing_power
                 current_x = start_x + (end_x - start_x) * eased_progress
-
                 self.obs_client.set_scene_item_transform(scene_name, item_id, {"positionX": current_x})
-
                 if step < steps:
                     await asyncio.sleep(step_delay)
 
-            logger.info(f"✅ Text slide complete: {source_name} at X:{end_x}")
+            logger.info(f"✅ WORKING: Text slide complete: {source_name} at X:{end_x}")
 
         except Exception as e:
             logger.error(f"Failed to animate text slide for {source_name}: {e}")
@@ -882,7 +790,22 @@ def load_config(config_file: str = 'config.json') -> Dict[str, Any]:
         "animation_config": {
             "enable_animations": True,
             "scene_name": "Main Stream",
-            "pause_duration": 0.15,
+            "animation_duration": 0.6,
+            "animation_steps": 25,
+
+            # Optional Text Animation Parameters (if not specified, uses working defaults)
+            "text_start_x": -500,
+            "text_end_x": None,
+            "text_easing_power": 2.5,
+
+            # Optional Image Animation Parameters (if not specified, uses working defaults)
+            "image_bounce_enabled": True,
+            "image_max_overshoot": 1.4,
+            "image_overshoot_point": 0.6,
+            "image_settle_point": 0.8,
+            "image_intermediate_scale": 1.1,
+            "image_easing_power": 2.0,
+
             "enable_celebrations": True,
             "celebration_scene": "GoalCompleted",
             "celebration_duration": 5.0,

@@ -212,7 +212,7 @@ class ArchipelagoAnimatedBridge:
             if source_name:
                 delay = i * 0.15  # 150ms stagger between images
                 task = asyncio.create_task(
-                    self.animate_image_pop_fixed(source_name, scene_name, duration * 0.8, steps, delay)
+                    self.animate_image_pop_fixed(source_name, scene_name, animation_config, duration * 0.8, steps, delay)
                 )
                 image_tasks.append(task)
 
@@ -310,9 +310,9 @@ class ArchipelagoAnimatedBridge:
         except Exception as e:
             logger.error(f"Failed to animate text slide for {source_name}: {e}")
 
-    async def animate_image_pop_fixed(self, source_name: str, scene_name: str, duration: float, steps: int,
-                                      delay: float = 0):
-        """Scale image from 0 to 1 with bounce effect - FIXED method signature"""
+    async def animate_image_pop_fixed(self, source_name: str, scene_name: str, animation_config: Dict, duration: float,
+                                      steps: int, delay: float = 0):
+        """Scale image from 0 to 1 with configurable bounce effect"""
         if delay > 0:
             logger.info(f"🎬 {source_name} waiting {delay}s before animation...")
             await asyncio.sleep(delay)
@@ -331,24 +331,44 @@ class ArchipelagoAnimatedBridge:
                 logger.warning(f"Image source {source_name} not found in scene {scene_name}")
                 return
 
+            # Get configurable parameters from animation_config with fallback defaults
+            bounce_enabled = animation_config.get('image_bounce_enabled', True)
+            max_overshoot = animation_config.get('image_max_overshoot', 1.4)
+            overshoot_point = animation_config.get('image_overshoot_point', 0.6)
+            settle_point = animation_config.get('image_settle_point', 0.8)
+            intermediate_scale = animation_config.get('image_intermediate_scale', 1.1)
+            easing_power = animation_config.get('image_easing_power', 2.0)
+
             step_delay = duration / steps
-            logger.info(f"🎬 Animating {source_name} scale 0→1 over {duration}s")
+            logger.info(f"🎬 Animating {source_name} scale 0→1 over {duration}s (bounce: {bounce_enabled})")
 
             for step in range(steps + 1):
                 progress = step / steps
 
-                # Bounce effect - overshoots then settles
-                if progress < 0.6:
-                    # Growing phase with overshoot
-                    scale = progress * 1.4  # Grow to 140%
-                elif progress < 0.8:
-                    # Settle back phase
-                    overshoot_progress = (progress - 0.6) / 0.2
-                    scale = 1.4 * 0.6 + (1.1 - 1.4 * 0.6) * overshoot_progress  # Settle to 110%
+                if bounce_enabled:
+                    # Bounce effect with configurable parameters
+                    if progress < overshoot_point:
+                        # Growing phase with overshoot
+                        scale = progress * max_overshoot
+                    elif progress < settle_point:
+                        # Settle back phase
+                        overshoot_progress = (progress - overshoot_point) / (settle_point - overshoot_point)
+                        scale = max_overshoot * (1 - overshoot_progress) + intermediate_scale * overshoot_progress
+                    else:
+                        # Final settle phase
+                        final_progress = (progress - settle_point) / (1 - settle_point)
+                        # Apply easing to final settle
+                        eased_progress = 1 - (1 - final_progress) ** easing_power
+                        scale = intermediate_scale * (1 - eased_progress) + 1.0 * eased_progress
                 else:
-                    # Final settle phase
-                    final_progress = (progress - 0.8) / 0.2
-                    scale = 1.1 + (1.0 - 1.1) * final_progress  # Settle to 100%
+                    # Simple linear or eased scaling without bounce
+                    if easing_power != 1.0:
+                        # Apply easing function
+                        eased_progress = 1 - (1 - progress) ** easing_power
+                        scale = eased_progress
+                    else:
+                        # Linear scaling
+                        scale = progress
 
                 # Ensure scale is never negative
                 scale = max(0, scale)

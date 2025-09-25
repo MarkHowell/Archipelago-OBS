@@ -1,0 +1,90 @@
+{
+  "archipelago_host": "archipelago.gg",
+  "archipelago_port": 59331,
+  "archipelago_password": "",
+  "bot_name": "Bridgeipelago",
+  "obs_host": "localhost",
+  "obs_port": 4455,
+  "obs_password": "UobcXG6dLjO3QJM0",
+  "images_base_dir": "./images",
+  "log_all_events": true,
+  "log_event_data": false,
+  "ticker_config": {
+    "text_source": "TickerText",
+    "player_image_source": "TickerPlayerImage",
+    "event_image_source": "TickerEventImage",
+    "item_image_source": "TickerItemImage",
+    "location_image_source": "TickerLocationImage"
+  },
+  "animation_config": {
+    "enable_animations": true,
+    "scene_name": "Main Stream",
+    "animation_duration": 0.6,
+    "animation_steps": 25,
+    "text_start_x": 4000,
+    "text_end_x": 500,
+    "text_easing_power": 2.5,
+    "image_bounce_enabled": true,
+    "image_max_overshoot": 1.4,
+    "image_overshoot_point": 0.6,
+    "image_settle_point": 0.8,
+    "image_intermediate_scale": 1.1,
+    "image_easing_power": 2.0,
+    "enable_celebrations": true,
+    "celebration_scene": "GoalCompleted",
+    "celebration_duration": 5.0,
+    "celebration_text_source": "CelebrationText",
+    "enable_fade_out": true,
+    "fade_out_delay": 5.0,
+    "fade_out_duration": 1.0,
+    "fade_out_steps": 20,
+    "fade_out_method": "scale",
+    "fade_out_easing_power": 2.0
+  },
+  "obs_actions": {
+    "item_received": {
+      "type": "text_update",
+      "source_name": "LastItemReceived",
+      "text_template": "{text}"
+    },
+    "item_sent": {
+      "type": "text_update",
+      "source_name": "LastItemSent",
+      "text_template": "{text}"
+    },
+    "location_checked": {
+      "type": "text_update",
+      "source_name": "LastLocationChecked",
+      "text_template": "{text}"
+    },
+    "player_joined": {
+      "type": "text_update",
+      "source_name": "PlayerStatus",
+      "text_template": "{text}"
+    },
+    "player_left": {
+      "type": "text_update",
+      "source_name": "PlayerStatus",
+      "text_template": "{text}"
+    },
+    "goal_completed": {
+      "type": "scene_switch",
+      "scene_name": "GoalCompleted"
+    },
+    "hint": {
+      "type": "text_update",
+      "source_name": "LastHint",
+      "text_template": "{text}"
+    },
+    "chat": {
+      "type": "text_update",
+      "source_name": "LastChatMessage",
+      "text_template": "{text}"
+    },
+    "server_message": {
+      "type": "text_update",
+      "source_name": "ServerMessage",
+      "text_template": "{text}"
+    }
+  }
+}

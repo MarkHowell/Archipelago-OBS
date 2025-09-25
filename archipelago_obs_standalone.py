@@ -187,6 +187,19 @@ class ArchipelagoAnimatedBridge:
                 await self.set_source_scale(source_name, scene_name, scale_x=0.0, scale_y=0.0)
 
     async def animate_ticker_to_final_positions(self, ticker_config: Dict, animation_config: Dict, scene_name: str):
+
+        # ENSURE SCENE IS SET TO MAIN STREAM BEFORE ANIMATIONS
+        try:
+            # Switch to the main stream scene before starting animations
+            self.obs_client.set_current_program_scene(scene_name)
+            logger.info(f"📺 Switched to scene '{scene_name}' before animation")
+
+            # Small delay to ensure scene switch is complete
+            await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.warning(f"Could not switch to scene '{scene_name}': {e}")
+            # Continue with animations even if scene switch fails
+
         """Animate all ticker elements to their final positions"""
         logger.info("🎬 Starting animations to final positions...")
 

@@ -84,6 +84,8 @@ class ArchipelagoAnimatedBridge:
         """Get player-specific image path"""
         safe_name = re.sub(r'[^\w\-_\.]', '_', player_name)
         player_img = self.images['players'] / f"{safe_name}.png"
+        logger.info(f"Player image: {player_img}")
+        logger.info(f"Player image safe name: {safe_name}")
 
         if player_img.exists():
             return str(player_img)

@@ -6,7 +6,7 @@
   "obs_host": "localhost",
   "obs_port": 4455,
   "obs_password": "UobcXG6dLjO3QJM0",
-  "images_base_dir": "./images",
+  "images_base_dir": "c:/Archimages",
   "log_all_events": true,
   "log_event_data": false,
   "ticker_config": {

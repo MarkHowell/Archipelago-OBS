@@ -647,6 +647,22 @@ class ArchipelagoAnimatedBridge:
         if any(keyword in line.lower() for keyword in ['item', 'location', 'player', 'goal', 'hint', 'chat']):
             await self.trigger_obs_event("raw_message", {"text": line, "timestamp": datetime.now().isoformat()})
 
+    def extract_player_name(self, full_player_string: str) -> str:
+        """
+        Extract just the player name from Archipelago's full player string.
+        Example: "GuvnahBRC__Team__1__viewing_Bomb_Rush_Cyberfunk" -> "GuvnahBRC"
+        """
+        # Split on common delimiters and take the first part
+        # Archipelago typically uses patterns like: PlayerName__Team__X__viewing_GameName
+        player_name = full_player_string.split('__')[0].strip()
+
+        # Also handle cases where there might be parentheses or brackets
+        player_name = player_name.split('(')[0].strip()
+        player_name = player_name.split('[')[0].strip()
+
+        logger.debug(f"Extracted player name: '{player_name}' from '{full_player_string}'")
+        return player_name
+
     async def handle_parsed_event(self, event_type: str, groups: tuple, raw_line: str):
         event_data = {
             "raw_line": raw_line,
@@ -655,47 +671,62 @@ class ArchipelagoAnimatedBridge:
         }
 
         if event_type == 'item_received':
+            # Extract clean player names
+            receiving_player = self.extract_player_name(groups[0])
+            sending_player = self.extract_player_name(groups[2])
+
             event_data.update({
-                "receiving_player": groups[0],
+                "receiving_player": receiving_player,
                 "item_name": groups[1],
-                "sending_player": groups[2],
-                "text": f"{groups[0]} received {groups[1]} from {groups[2]}",
-                "ticker_text": f"{groups[0]} got {groups[1]}!",
-                "player_name": groups[0]
+                "sending_player": sending_player,
+                "text": f"{receiving_player} received {groups[1]} from {sending_player}",
+                "ticker_text": f"{receiving_player} got {groups[1]}!",
+                "player_name": receiving_player  # Use cleaned name for image lookup
             })
         elif event_type == 'item_sent':
+            sending_player = self.extract_player_name(groups[0])
+            receiving_player = self.extract_player_name(groups[2])
+
             event_data.update({
-                "sending_player": groups[0],
+                "sending_player": sending_player,
                 "item_name": groups[1],
-                "receiving_player": groups[2],
-                "text": f"{groups[0]} sent {groups[1]} to {groups[2]}",
-                "ticker_text": f"{groups[0]} sent {groups[1]}!",
-                "player_name": groups[0]
+                "receiving_player": receiving_player,
+                "text": f"{sending_player} sent {groups[1]} to {receiving_player}",
+                "ticker_text": f"{sending_player} sent {groups[1]}!",
+                "player_name": sending_player
             })
         elif event_type == 'location_checked':
+            player_name = self.extract_player_name(groups[0])
+
             event_data.update({
-                "player_name": groups[0],
+                "player_name": player_name,
                 "location_name": groups[1],
-                "text": f"{groups[0]} checked {groups[1]}",
-                "ticker_text": f"{groups[0]} found {groups[1]}!"
+                "text": f"{player_name} checked {groups[1]}",
+                "ticker_text": f"{player_name} found {groups[1]}!"
             })
         elif event_type == 'player_joined':
+            player_name = self.extract_player_name(groups[0])
+
             event_data.update({
-                "player_name": groups[0],
-                "text": f"{groups[0]} joined the game",
-                "ticker_text": f"{groups[0]} joined!"
+                "player_name": player_name,
+                "text": f"{player_name} joined the game",
+                "ticker_text": f"{player_name} joined!"
             })
         elif event_type == 'player_left':
+            player_name = self.extract_player_name(groups[0])
+
             event_data.update({
-                "player_name": groups[0],
-                "text": f"{groups[0]} left the game",
-                "ticker_text": f"{groups[0]} left"
+                "player_name": player_name,
+                "text": f"{player_name} left the game",
+                "ticker_text": f"{player_name} left"
             })
         elif event_type == 'goal_completed':
+            player_name = self.extract_player_name(groups[0])
+
             event_data.update({
-                "player_name": groups[0],
-                "text": f"{groups[0]} completed their goal!",
-                "ticker_text": f"🎉 {groups[0]} COMPLETED THEIR GOAL! 🎉"
+                "player_name": player_name,
+                "text": f"{player_name} completed their goal!",
+                "ticker_text": f"🎉 {player_name} COMPLETED THEIR GOAL! 🎉"
             })
         elif event_type == 'hint':
             event_data.update({
@@ -704,12 +735,14 @@ class ArchipelagoAnimatedBridge:
                 "ticker_text": f"💡 Hint: {groups[0]}"
             })
         elif event_type == 'chat':
+            player_name = self.extract_player_name(groups[1])
+
             event_data.update({
                 "timestamp_str": groups[0],
-                "player_name": groups[1],
+                "player_name": player_name,
                 "message": groups[2],
-                "text": f"{groups[1]}: {groups[2]}",
-                "ticker_text": f"{groups[1]}: {groups[2]}"
+                "text": f"{player_name}: {groups[2]}",
+                "ticker_text": f"{player_name}: {groups[2]}"
             })
         elif event_type == 'server_message':
             event_data.update({

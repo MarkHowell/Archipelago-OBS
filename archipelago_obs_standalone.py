@@ -535,6 +535,14 @@ class ArchipelagoAnimatedBridge:
         if not self.archipelago_dir:
             raise Exception("Archipelago directory not found")
 
+        # Debug: Check what files exist
+        logger.info(f"Archipelago directory: {self.archipelago_dir}")
+        common_client_path = os.path.join(self.archipelago_dir, "CommonClient.py")
+        text_client_path = os.path.join(self.archipelago_dir, "TextClient.py")
+        logger.info(f"CommonClient.py exists: {os.path.exists(common_client_path)}")
+        logger.info(f"TextClient.py exists: {os.path.exists(text_client_path)}")
+        logger.info(f"Python executable: {sys.executable}")
+
         approaches = [
             {
                 "cmd": [
@@ -570,16 +578,19 @@ class ArchipelagoAnimatedBridge:
             if self.config.get('archipelago_password') and not approach.get('manual_connect'):
                 cmd.extend(["--password", self.config['archipelago_password']])
 
+            logger.info(f"Full command: {' '.join(cmd)}")
+
             try:
                 self.archipelago_process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
+                    stderr=subprocess.PIPE,  # Separate stderr to see errors
                     stdin=subprocess.PIPE,
                     universal_newlines=True,
                     bufsize=1,
                     cwd=self.archipelago_dir
                 )
+
                 if approach.get('manual_connect'):
                     connection_commands = [
                         f"/connect {self.config.get('archipelago_host', 'localhost')}:{self.config.get('archipelago_port', 38281)}",
@@ -590,23 +601,54 @@ class ArchipelagoAnimatedBridge:
                     for cmd in connection_commands:
                         self.archipelago_process.stdin.write(cmd + '\n')
                         self.archipelago_process.stdin.flush()
-                import time;
+
+                import time
                 time.sleep(2)
+
+                # Check if process is still running and capture any early output/errors
                 if self.archipelago_process.poll() is None:
-                    logger.info(f"Approach {i + 1} successful - process running")
+                    logger.info(
+                        f"Approach {i + 1} successful - process running with PID {self.archipelago_process.pid}")
                     return self.archipelago_process
                 else:
-                    logger.warning(f"Approach {i + 1} failed - exited with {self.archipelago_process.returncode}")
+                    return_code = self.archipelago_process.returncode
+                    # Capture any output/errors that occurred
+                    stdout_data = self.archipelago_process.stdout.read()
+                    stderr_data = self.archipelago_process.stderr.read()
+                    logger.warning(f"Approach {i + 1} failed - exited with code {return_code}")
+                    if stdout_data:
+                        logger.warning(f"STDOUT: {stdout_data}")
+                    if stderr_data:
+                        logger.warning(f"STDERR: {stderr_data}")
                     continue
             except Exception as e:
-                logger.warning(f"Approach {i + 1} failed: {e}")
+                logger.warning(f"Approach {i + 1} failed with exception: {e}")
                 continue
+
         raise Exception("All client startup approaches failed")
 
     async def process_archipelago_output(self):
         if not self.archipelago_process:
             return
         logger.info("Starting to monitor Archipelago client output...")
+
+        # Create a task to monitor stderr
+        async def monitor_stderr():
+            try:
+                while self.running and self.archipelago_process.poll() is None:
+                    line = await asyncio.get_event_loop().run_in_executor(
+                        None, self.archipelago_process.stderr.readline
+                    )
+                    if line:
+                        line = line.strip()
+                        if line:
+                            logger.error(f"STDERR: {line}")
+            except Exception as e:
+                logger.error(f"Error monitoring stderr: {e}")
+
+        # Start stderr monitoring task
+        stderr_task = asyncio.create_task(monitor_stderr())
+
         patterns = {
             'item_received': re.compile(r'(.+) received (.+) from (.+)'),
             'item_sent': re.compile(r'(.+) sent (.+) to (.+)'),
@@ -615,13 +657,14 @@ class ArchipelagoAnimatedBridge:
             'player_left': re.compile(r'(.+) has left'),
             'goal_completed': re.compile(r'(.+) completed their goal'),
             'hint': re.compile(r'Hint: (.+)'),
-            'chat': re.compile(r'\[(.+?)\] (.+?): (.+)'),  # Keep non-greedy for timestamp and player
+            'chat': re.compile(r'\[(.+?)\] (.+?): (.+)'),
             'server_message': re.compile(r'Notice.*?: (.+)'),
             'release': re.compile(r'(.+) has released'),
             'collect': re.compile(r'(.+) has collected'),
             'connected': re.compile(r'Successfully connected to (.+)'),
             'connection_failed': re.compile(r'Failed to connect|Connection.*failed|Unable to connect'),
         }
+
         try:
             while self.running and self.archipelago_process.poll() is None:
                 line = await asyncio.get_event_loop().run_in_executor(
@@ -633,12 +676,15 @@ class ArchipelagoAnimatedBridge:
                 if not line:
                     continue
 
+                logger.debug(f"RAW OUTPUT: {line}")
+
                 # Strip ANSI color codes before parsing
                 clean_line = self.strip_ansi_codes(line)
                 await self.parse_and_trigger_events(clean_line, patterns)
         except Exception as e:
             logger.error(f"Error processing Archipelago output: {e}")
         finally:
+            stderr_task.cancel()
             logger.info("Stopped monitoring Archipelago output")
 
     def strip_ansi_codes(self, text: str) -> str:

@@ -608,18 +608,18 @@ class ArchipelagoAnimatedBridge:
             return
         logger.info("Starting to monitor Archipelago client output...")
         patterns = {
-            'item_received': re.compile(r'(.+?) received (.+?) from (.+?)'),
-            'item_sent': re.compile(r'(.+?) sent (.+?) to (.+?)'),
-            'location_checked': re.compile(r'(.+?) checked (.+?)'),
-            'player_joined': re.compile(r'(.+?) has joined'),
-            'player_left': re.compile(r'(.+?) has left'),
-            'goal_completed': re.compile(r'(.+?) completed their goal'),
-            'hint': re.compile(r'Hint: (.+?)'),
-            'chat': re.compile(r'\[(.+?)\] (.+?): (.+)'),
+            'item_received': re.compile(r'(.+) received (.+) from (.+)'),
+            'item_sent': re.compile(r'(.+) sent (.+) to (.+)'),
+            'location_checked': re.compile(r'(.+) checked (.+)'),
+            'player_joined': re.compile(r'(.+) has joined'),
+            'player_left': re.compile(r'(.+) has left'),
+            'goal_completed': re.compile(r'(.+) completed their goal'),
+            'hint': re.compile(r'Hint: (.+)'),
+            'chat': re.compile(r'\[(.+?)\] (.+?): (.+)'),  # Keep non-greedy for timestamp and player
             'server_message': re.compile(r'Notice.*?: (.+)'),
-            'release': re.compile(r'(.+?) has released'),
-            'collect': re.compile(r'(.+?) has collected'),
-            'connected': re.compile(r'Successfully connected to (.+?)'),
+            'release': re.compile(r'(.+) has released'),
+            'collect': re.compile(r'(.+) has collected'),
+            'connected': re.compile(r'Successfully connected to (.+)'),
             'connection_failed': re.compile(r'Failed to connect|Connection.*failed|Unable to connect'),
         }
         try:
@@ -632,11 +632,19 @@ class ArchipelagoAnimatedBridge:
                 line = line.strip()
                 if not line:
                     continue
-                await self.parse_and_trigger_events(line, patterns)
+
+                # Strip ANSI color codes before parsing
+                clean_line = self.strip_ansi_codes(line)
+                await self.parse_and_trigger_events(clean_line, patterns)
         except Exception as e:
             logger.error(f"Error processing Archipelago output: {e}")
         finally:
             logger.info("Stopped monitoring Archipelago output")
+
+    def strip_ansi_codes(self, text: str) -> str:
+        """Remove ANSI color codes from text"""
+        ansi_escape = re.compile(r'\x1b\[[0-9;]*m')
+        return ansi_escape.sub('', text)
 
     async def parse_and_trigger_events(self, line: str, patterns: Dict[str, re.Pattern]):
         for event_type, pattern in patterns.items():

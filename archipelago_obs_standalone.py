@@ -746,7 +746,7 @@ class ArchipelagoAnimatedBridge:
                 "item_name": groups[1],
                 "receiving_player": groups[2],  # Full string with game info
                 "text": f"{groups[0]} sent {groups[1]} to {groups[2]}",
-                "ticker_text": f"{groups[0]} sent {groups[1]}!",
+                "ticker_text": f"{groups[0]} sent {groups[1]} to {groups[2]}!",  # Changed this line
                 "player_name": sending_player_clean
             })
         elif event_type == 'location_checked':
